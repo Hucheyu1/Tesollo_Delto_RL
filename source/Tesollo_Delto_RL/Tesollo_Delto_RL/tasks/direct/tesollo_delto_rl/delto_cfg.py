@@ -32,7 +32,7 @@ TESOLLO_CFG = ArticulationCfg(
         joint_drive_props=sim_utils.JointDrivePropertiesCfg(drive_type="force"),
     ),
     init_state=ArticulationCfg.InitialStateCfg(
-        pos=(0.0, 0.0, 0.35),
+        pos=(0.0, 0.0, 0.60),
         rot=(0.0, 0.92388, 0.0, 0.38268),  # wxyz  水平向下倾斜45度
         # rot=(0.0, 0.86603, 0.0, 0.5),  #wxyz  水平向下倾斜30度
         # rot=(1., 0., 0., 0.),  #wxyz

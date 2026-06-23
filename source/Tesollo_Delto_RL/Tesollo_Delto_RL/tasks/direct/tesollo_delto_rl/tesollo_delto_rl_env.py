@@ -17,7 +17,7 @@ from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
-from isaaclab.utils.math import quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
+from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
 if TYPE_CHECKING:
     from isaaclab_tasks.direct.allegro_hand.allegro_hand_env_cfg import AllegroHandEnvCfg
@@ -29,7 +29,20 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
     def __init__(self, cfg: AllegroHandEnvCfg | TesolloDeltoRlEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-         # 获取手部自由度数量
+        if self.hand.num_instances != self.num_envs:
+            raise RuntimeError(
+                "Robot articulation was not cloned for all environments: "
+                f"hand.num_instances={self.hand.num_instances}, num_envs={self.num_envs}. "
+                "Check robot_cfg.prim_path and scene cloning settings."
+            )
+        if self.object.num_instances != self.num_envs:
+            raise RuntimeError(
+                "Object was not cloned for all environments: "
+                f"object.num_instances={self.object.num_instances}, num_envs={self.num_envs}. "
+                "Check object_cfg.prim_path and scene cloning settings."
+            )
+
+        # 获取手部自由度数量
         self.num_hand_dofs = self.hand.num_joints
 
         # 位置目标缓冲区
@@ -58,7 +71,16 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # 跟踪目标重置
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # 用于比较物体位置
-        self.in_hand_pos = self.object.data.default_root_state[:, 0:3].clone()
+        self.object_palm_local_pos = torch.tensor(self.cfg.object_palm_local_pos, dtype=torch.float, device=self.device)
+        self.object_palm_world_offset = torch.tensor(
+            self.cfg.object_palm_world_offset, dtype=torch.float, device=self.device
+        )
+        self.object_default_pos = self.hand.data.default_root_state[:, 0:3] + quat_apply(
+            self.hand.data.default_root_state[:, 3:7],
+            self.object_palm_local_pos.repeat((self.num_envs, 1)),
+        )
+        self.object_default_pos += self.object_palm_world_offset
+        self.in_hand_pos = self.object_default_pos.clone()
         self.in_hand_pos[:, 2] -= 0.04
         # 默认目标位置
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
@@ -230,7 +252,7 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
         # global object positions
         object_default_state[:, 0:3] = (
-            object_default_state[:, 0:3] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
+            self.object_default_pos[env_ids] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
         )
 
         rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
