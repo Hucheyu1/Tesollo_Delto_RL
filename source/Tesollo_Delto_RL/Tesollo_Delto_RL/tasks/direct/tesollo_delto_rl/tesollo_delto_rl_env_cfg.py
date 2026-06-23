@@ -18,7 +18,7 @@ from isaaclab.utils import configclass
 from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
-from isaaclab_assets.robots.shadow_hand import SHADOW_HAND_CFG
+from .delto_cfg import TESOLLO_CFG
 
 
 @configclass
@@ -66,19 +66,8 @@ class EventCfg:
             "distribution": "gaussian",
         },
     )
-    # 机器人肌腱属性随机化事件配置。随机化机器人肌腱的刚度和阻尼参数。
-    robot_tendon_properties = EventTerm(
-        func=mdp.randomize_fixed_tendon_parameters,
-        min_step_count_between_reset=720,
-        mode="reset",
-        params={
-            "asset_cfg": SceneEntityCfg("robot", fixed_tendon_names=".*"),
-            "stiffness_distribution_params": (0.75, 1.5),
-            "damping_distribution_params": (0.3, 3.0),
-            "operation": "scale",
-            "distribution": "log_uniform",
-        },
-    )
+    # DG5F 资产没有 ShadowHand 使用的 fixed tendon，保留该事件会在解析 tendon 名称时失败。
+    robot_tendon_properties = None
 
     # 物体物理材质随机化事件配置。随机化物体刚体的静态摩擦、动态摩擦和恢复系数
     object_physics_material = EventTerm(
@@ -126,7 +115,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     decimation = 2
     episode_length_s = 10.0
     action_space = 20
-    observation_space = 157  # (full)
+    observation_space = 149  # (full)
     state_space = 0
     asymmetric_obs = False
     obs_type = "full"
@@ -144,43 +133,37 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         ),
     )
     # 机器人配置参数
-    robot_cfg: ArticulationCfg = SHADOW_HAND_CFG.replace(prim_path="/World/envs/env_.*/Robot").replace(
-        init_state=ArticulationCfg.InitialStateCfg(
-            pos=(0.0, 0.0, 0.5),
-            rot=(1.0, 0.0, 0.0, 0.0),
-            joint_pos={".*": 0.0},
-        )
-    )
+    robot_cfg: ArticulationCfg = TESOLLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
     # 可驱动关节名称列表
     actuated_joint_names = [
-        "robot0_WRJ1",
-        "robot0_WRJ0",
-        "robot0_FFJ3",
-        "robot0_FFJ2",
-        "robot0_FFJ1",
-        "robot0_MFJ3",
-        "robot0_MFJ2",
-        "robot0_MFJ1",
-        "robot0_RFJ3",
-        "robot0_RFJ2",
-        "robot0_RFJ1",
-        "robot0_LFJ4",
-        "robot0_LFJ3",
-        "robot0_LFJ2",
-        "robot0_LFJ1",
-        "robot0_THJ4",
-        "robot0_THJ3",
-        "robot0_THJ2",
-        "robot0_THJ1",
-        "robot0_THJ0",
+        "rj_dg_1_1",
+        "rj_dg_1_2",
+        "rj_dg_1_3",
+        "rj_dg_1_4",
+        "rj_dg_2_1",
+        "rj_dg_2_2",
+        "rj_dg_2_3",
+        "rj_dg_2_4",
+        "rj_dg_3_1",
+        "rj_dg_3_2",
+        "rj_dg_3_3",
+        "rj_dg_3_4",
+        "rj_dg_4_1",
+        "rj_dg_4_2",
+        "rj_dg_4_3",
+        "rj_dg_4_4",
+        "rj_dg_5_1",
+        "rj_dg_5_2",
+        "rj_dg_5_3",
+        "rj_dg_5_4",
     ]
     # 指尖刚体名称列表
     fingertip_body_names = [
-        "robot0_ffdistal",
-        "robot0_mfdistal",
-        "robot0_rfdistal",
-        "robot0_lfdistal",
-        "robot0_thdistal",
+        "rl_dg_1_tip",
+        "rl_dg_2_tip",
+        "rl_dg_3_tip",
+        "rl_dg_4_tip",
+        "rl_dg_5_tip",
     ]
 
     # in-hand object
@@ -245,7 +228,7 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     episode_length_s = 8.0
     action_space = 20
     observation_space = 42
-    state_space = 187
+    state_space = 179
     asymmetric_obs = True
     obs_type = "openai"
     # simulation

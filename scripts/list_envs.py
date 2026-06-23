@@ -10,7 +10,7 @@ The script iterates over all registered environments and stores the details in a
 It prints the name of the environment, the entry point and the config file.
 
 All the environments are registered in the `Tesollo_Delto_RL` extension. They start
-with `Isaac` in their name.
+with `Tesollo` in their name.
 """
 
 """Launch Isaac Sim Simulator first."""
@@ -50,9 +50,10 @@ def main():
 
     # count of environments
     index = 0
-    # acquire all Isaac environments names
+    # acquire all Tesollo environments names
+    keyword = args_cli.keyword or "Tesollo"
     for task_spec in gym.registry.values():
-        if "Template-" in task_spec.id and (args_cli.keyword is None or args_cli.keyword in task_spec.id):
+        if keyword in task_spec.id:
             # add details to table
             table.add_row([index + 1, task_spec.id, task_spec.entry_point, task_spec.kwargs["env_cfg_entry_point"]])
             # increment count

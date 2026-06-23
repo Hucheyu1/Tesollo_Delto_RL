@@ -147,9 +147,9 @@ class FeatureExtractor:
             depth_img (torch.Tensor): Depth image tensor. Shape: (N, H, W, 1).
             segmentation_img (torch.Tensor): Segmentation image tensor. Shape: (N, H, W, 3).
         """
-        save_images_to_file(rgb_img, "shadow_hand_rgb.png")
-        save_images_to_file(depth_img, "shadow_hand_depth.png")
-        save_images_to_file(segmentation_img, "shadow_hand_segmentation.png")
+        save_images_to_file(rgb_img, "tesollo_delto_rgb.png")
+        save_images_to_file(depth_img, "tesollo_delto_depth.png")
+        save_images_to_file(segmentation_img, "tesollo_delto_segmentation.png")
 
     def step(
         self, rgb_img: torch.Tensor, depth_img: torch.Tensor, segmentation_img: torch.Tensor, gt_pose: torch.Tensor

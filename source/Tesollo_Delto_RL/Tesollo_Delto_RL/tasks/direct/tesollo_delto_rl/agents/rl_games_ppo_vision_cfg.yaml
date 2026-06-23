@@ -47,7 +47,7 @@ params:
   load_path: '' # path to the checkpoint to load
 
   config:
-    name: shadow_hand_vision
+    name: TesolloDelto_vision
     env_name: rlgpu
     device: 'cuda:0'
     device_name: 'cuda:0'

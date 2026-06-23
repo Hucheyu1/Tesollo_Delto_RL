@@ -40,8 +40,8 @@ class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
     feature_extractor = FeatureExtractorCfg()
 
     # env
-    observation_space = 164 + 27  # state observation + vision CNN embedding
-    state_space = 187 + 27  # asymettric states + vision CNN embedding
+    observation_space = 156 + 27  # proprioception + goal keypoints + vision CNN embedding
+    state_space = 179 + 27  # asymettric states + vision CNN embedding
 
 
 @configclass
