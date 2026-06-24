@@ -1,8 +1,5 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers (https://github.com/isaac-sim/IsaacLab/blob/main/CONTRIBUTORS.md).
-# All rights reserved.
-#
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
-
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
@@ -10,12 +7,10 @@ from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
-from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 from .delto_cfg import TESOLLO_CFG
@@ -23,11 +18,8 @@ from .delto_cfg import TESOLLO_CFG
 
 @configclass
 class EventCfg:
-    """配置随机化参数。
-    该类定义了环境重置时的随机化事件，包括机器人和物体的物理属性、关节参数等。
-    """
+    """Domain randomization config."""
 
-    # 机器人物理材质随机化事件配置。随机化机器人刚体的静态摩擦、动态摩擦和恢复系数。
     robot_physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         mode="reset",
@@ -40,7 +32,7 @@ class EventCfg:
             "num_buckets": 250,
         },
     )
-    # 机器人关节刚度和阻尼随机化事件配置。随机化机器人关节的刚度和阻尼参数。
+
     robot_joint_stiffness_and_damping = EventTerm(
         func=mdp.randomize_actuator_gains,
         min_step_count_between_reset=720,
@@ -53,7 +45,7 @@ class EventCfg:
             "distribution": "log_uniform",
         },
     )
-    # 机器人关节位置限制随机化事件配置。随机化机器人关节的上下限位置参数。
+
     robot_joint_pos_limits = EventTerm(
         func=mdp.randomize_joint_parameters,
         min_step_count_between_reset=720,
@@ -66,10 +58,10 @@ class EventCfg:
             "distribution": "gaussian",
         },
     )
-    # DG5F 资产没有 ShadowHand 使用的 fixed tendon，保留该事件会在解析 tendon 名称时失败。
+
+    # DG5F / Tesollo 没有 ShadowHand 的 fixed tendon，不能保留 tendon randomization
     robot_tendon_properties = None
 
-    # 物体物理材质随机化事件配置。随机化物体刚体的静态摩擦、动态摩擦和恢复系数
     object_physics_material = EventTerm(
         func=mdp.randomize_rigid_body_material,
         min_step_count_between_reset=720,
@@ -82,7 +74,7 @@ class EventCfg:
             "num_buckets": 250,
         },
     )
-    # 物体质量随机化事件配置。随机化物体的质量参数
+
     object_scale_mass = EventTerm(
         func=mdp.randomize_rigid_body_mass,
         min_step_count_between_reset=720,
@@ -95,12 +87,11 @@ class EventCfg:
         },
     )
 
-    # 场景重置重力随机化事件配置。定期随机化场景重力参数。
     reset_gravity = EventTerm(
         func=mdp.randomize_physics_scene_gravity,
         mode="interval",
         is_global_time=True,
-        interval_range_s=(36.0, 36.0),  # time_s = num_steps * (decimation * dt)
+        interval_range_s=(36.0, 36.0),
         params={
             "gravity_distribution_params": ([0.0, 0.0, 0.0], [0.0, 0.0, 0.4]),
             "operation": "add",
@@ -114,26 +105,30 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     # env
     decimation = 2
     episode_length_s = 10.0
+
+    # action / observation
     action_space = 20
-    observation_space = 149  # (full)
+    observation_space = 149
     state_space = 0
     asymmetric_obs = False
     obs_type = "full"
+    action_scale = 0.5
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
         render_interval=decimation,
         physics_material=RigidBodyMaterialCfg(
-            static_friction=1.0,
-            dynamic_friction=1.0,
+            static_friction=0.3,
+            dynamic_friction=0.3,
         ),
-        physx=PhysxCfg(bounce_threshold_velocity=0.2, gpu_collision_stack_size=2**30),
     )
-    # 机器人配置参数
+
+    # robot
     robot_cfg: ArticulationCfg = TESOLLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
-    # 可驱动关节名称列表
-    actuated_joint_names = [
+
+    # 20 个可控关节，顺序建议和实机动作顺序保持一致
+    hand_joint_names = [
         "rj_dg_1_1",
         "rj_dg_1_2",
         "rj_dg_1_3",
@@ -155,20 +150,46 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         "rj_dg_5_3",
         "rj_dg_5_4",
     ]
-    # 指尖刚体名称列表
-    fingertip_body_names = [
-        "rl_dg_1_4",
-        "rl_dg_2_4",
-        "rl_dg_3_4",
-        "rl_dg_4_4",
-        "rl_dg_5_4",
-    ]
+    # action 顺序就使用 hand_joint_names 顺序
+    actuated_joint_names = hand_joint_names
 
-    # in-hand object
+    # 初始关节位置，单位：rad
+    hand_position = [
+        0.1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.7,
+        0.5,
+        0.5,
+        0.5,
+        0.0,
+        0.7,
+        0.7,
+        0.7,
+        0.7,
+        1.57,
+        0.3,
+        1.0,
+        1.0,
+        1.0,
+        1.57,
+    ]
+    # 关节上限，单位：deg
+    hand_upper_limits = [50, 35, 30, 24, 60, 0, 115, 112, 109, 35, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]
+    # 关节下限，单位：deg
+    hand_lower_limits = [-22, -24, -30, -35, 0, -150, 0, 0, 0, -24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+    # 是否使用上面手动配置的关节初始位置和上下限
+    use_manual_joint_cfg = True
+    # 这个名字必须和 USD 里的 body name 一致
+    fingertip_body_names = ["rl_dg_1_4", "rl_dg_2_4", "rl_dg_3_4", "rl_dg_4_4", "rl_dg_5_4"]
+
+    # object
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.UsdFileCfg(
-            usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
+            usd_path="/home/amlrobotics/hcy_ws/Tesollo_Delto_RL_main/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -179,51 +200,65 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
                 stabilization_threshold=0.0025,
                 max_depenetration_velocity=1000.0,
             ),
-            mass_props=sim_utils.MassPropertiesCfg(density=567.0),
-            semantic_tags=[("class", "cube")],
         ),
-        # This value is overwritten from the robot-relative palm pose on reset.
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.1233, 0.0018, 0.6904), rot=(1.0, 0.0, 0.0, 0.0)),
-    )
-    # DG5F palm center estimated from the USD palm geometry in robot-local coordinates.
-    object_palm_local_pos = (-0.0046, 0.0018, 0.1233)
-    # Offsets from the palm center in robot-local coordinates. DG5F's palm normal is local +X.
-    object_palm_local_offset = (0.095, 0.0, 0.0)
-    in_hand_palm_local_offset = (0.055, 0.0, 0.0)
-    goal_marker_palm_local_offset = (0.22, 0.0, 0.0)
-    # 目标物体可视化标记配置
-    goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
-        prim_path="/Visuals/goal_marker",
-        markers={
-            "goal": sim_utils.UsdFileCfg(
-                usd_path=f"{ISAAC_NUCLEUS_DIR}/Props/Blocks/DexCube/dex_cube_instanceable.usd",
-                scale=(1.0, 1.0, 1.0),
-            )
-        },
-    )
-    # 场景配置参数
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=8192, env_spacing=0.75, replicate_physics=True, clone_in_fabric=True
+        init_state=RigidObjectCfg.InitialStateCfg(
+            pos=(0.11, 0.00267, 0.13),
+            rot=(1.0, 0.0, 0.0, 0.0),
+        ),
     )
 
-    # reset
-    reset_position_noise = 0.01  # 重置时位置噪声范围
-    reset_dof_pos_noise = 0.2  # 重置时关节位置噪声范围
-    reset_dof_vel_noise = 0.0  # 重置时关节速度噪声范围
-    # reward scales
-    dist_reward_scale = -10.0
-    rot_reward_scale = 1.0
-    rot_eps = 0.1
-    action_penalty_scale = -0.0002
-    reach_goal_bonus = 250
-    fall_penalty = 0
-    fall_dist = 0.24
-    vel_obs_scale = 0.2
-    success_tolerance = 0.1
-    max_consecutive_success = 0
-    av_factor = 0.1
-    act_moving_average = 1.0
-    force_torque_obs_scale = 10.0
+    # scene
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=2048,
+        env_spacing=0.75,
+        replicate_physics=True,
+        clone_in_fabric=False,
+    )
+
+    # 重置配置
+    # reset_position_noise = 0.01  # 位置重置噪声
+    # reset_dof_pos_noise = 0.2  # 关节位置重置噪声
+    # reset_dof_vel_noise = 0.0  # 关节速度重置噪声
+    reset_position_noise = 0  # 位置重置噪声
+    reset_dof_pos_noise = 0  # 关节位置重置噪声
+    reset_dof_vel_noise = 0  # 关节速度重置噪声
+
+    # 手中目标配置：在物体初始局部位置基础上，沿手掌局部z方向稍微往内
+    in_hand_local_offset = (0.0, 0.0, -0.04)
+
+    # 奖励函数配置
+    dist_reward_scale = -10.0  # 距离奖励缩放因子
+    rot_reward_scale = 1.0  # 旋转奖励缩放因子
+    rot_eps = 0.1  # 旋转奖励的epsilon值
+    action_penalty_scale = -0.0002  # 动作惩罚缩放因子
+    reach_goal_bonus = 250.0  # 达成目标奖励
+    fall_penalty = -50.0  # 物体掉落惩罚
+    fall_dist = 0.24  # 掉落距离阈值
+    vel_obs_scale = 0.2  # 速度观测缩放因子
+    success_tolerance = 0.1  # 成功容忍度
+    max_consecutive_success = 0  # 最大连续成功次数
+    av_factor = 0.1  # 平均因子
+    act_moving_average = 1.0  # 动作移动平均因子
+    force_torque_obs_scale = 10.0  # 力/力矩观测缩放因子
+
+    # 目标物体可视化 marker：使用 tomato 作为目标姿态显示
+    # goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
+    #     prim_path="/Visuals/goal_marker",
+    #     markers={
+    #         "goal": sim_utils.UsdFileCfg(
+    #             usd_path="/home/amlrobotics/hcy_ws/Tesollo_Delto_RL_main/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+    #             scale=(1.0, 1.0, 1.0),
+    #         )
+    #     },
+    # )
+
+    # viewer camera, 近距离看手和物体
+    # viewer = ViewerCfg(
+    #     eye=(0.35, -0.75, 0.55),
+    #     lookat=(0.10, 0.00, 0.20),
+    #     origin_type="env",
+    #     env_index=0,
+    # )
 
 
 @configclass
@@ -231,18 +266,19 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     # env
     decimation = 3
     episode_length_s = 8.0
+
     action_space = 20
     observation_space = 42
     state_space = 179
     asymmetric_obs = True
     obs_type = "openai"
-    # simulation
+
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 60,
         render_interval=decimation,
         physics_material=RigidBodyMaterialCfg(
-            static_friction=1.0,
-            dynamic_friction=1.0,
+            static_friction=0.3,
+            dynamic_friction=0.3,
         ),
         physx=PhysxCfg(
             bounce_threshold_velocity=0.2,
@@ -250,17 +286,17 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
             gpu_max_rigid_patch_count=2**23,
         ),
     )
-    # reset
-    reset_position_noise = 0.01  # range of position at reset
-    reset_dof_pos_noise = 0.2  # range of dof pos at reset
-    reset_dof_vel_noise = 0.0  # range of dof vel at reset
-    # reward scales
+
+    reset_position_noise = 0.01
+    reset_dof_pos_noise = 0.2
+    reset_dof_vel_noise = 0.0
+
     dist_reward_scale = -10.0
     rot_reward_scale = 1.0
     rot_eps = 0.1
     action_penalty_scale = -0.0002
-    reach_goal_bonus = 250
-    fall_penalty = -50
+    reach_goal_bonus = 250.0
+    fall_penalty = -50.0
     fall_dist = 0.24
     vel_obs_scale = 0.2
     success_tolerance = 0.4
@@ -268,14 +304,14 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     av_factor = 0.1
     act_moving_average = 0.3
     force_torque_obs_scale = 10.0
-    # domain randomization config
+
     events: EventCfg = EventCfg()
-    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
+
     action_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
         noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.05, operation="add"),
         bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.015, operation="abs"),
     )
-    # at every time-step add gaussian noise + bias. The bias is a gaussian sampled at reset
+
     observation_noise_model: NoiseModelWithAdditiveBiasCfg = NoiseModelWithAdditiveBiasCfg(
         noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.002, operation="add"),
         bias_noise_cfg=GaussianNoiseCfg(mean=0.0, std=0.0001, operation="abs"),

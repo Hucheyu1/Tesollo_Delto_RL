@@ -15,9 +15,8 @@ from isaaclab.sensors import TiledCamera, TiledCameraCfg
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply
 
-from .tesollo_delto_rl_env import TesolloDeltoRlEnv, unscale
-
 from .feature_extractor import FeatureExtractor, FeatureExtractorCfg
+from .tesollo_delto_rl_env import TesolloDeltoRlEnv, unscale
 from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
 
 
@@ -179,7 +178,7 @@ def compute_keypoints(
         # which dimensions to negate
         n = [((i >> k) & 1) == 0 for k in range(3)]
         corner_loc = ([(1 if n[k] else -1) * s / 2 for k, s in enumerate(size)],)
-        corner = torch.tensor(corner_loc, dtype=torch.float32, device=pose.device) * out[:, i, :] # type: ignore
+        corner = torch.tensor(corner_loc, dtype=torch.float32, device=pose.device) * out[:, i, :]  # type: ignore
         # express corner position in the world frame
         out[:, i, :] = pose[:, :3] + quat_apply(pose[:, 3:7], corner)  # type: ignore
 
