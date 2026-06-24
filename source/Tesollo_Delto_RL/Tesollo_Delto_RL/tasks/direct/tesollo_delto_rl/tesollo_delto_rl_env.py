@@ -54,7 +54,6 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.actuated_dof_indices = list()
         for joint_name in cfg.actuated_joint_names:
             self.actuated_dof_indices.append(self.hand.joint_names.index(joint_name))
-        self.actuated_dof_indices.sort()
 
         # 手指身体索引列表
         self.finger_bodies = list()
@@ -72,21 +71,23 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.reset_goal_buf = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # 用于比较物体位置
         self.object_palm_local_pos = torch.tensor(self.cfg.object_palm_local_pos, dtype=torch.float, device=self.device)
-        self.object_palm_world_offset = torch.tensor(
-            self.cfg.object_palm_world_offset, dtype=torch.float, device=self.device
+        self.object_palm_local_offset = torch.tensor(
+            self.cfg.object_palm_local_offset, dtype=torch.float, device=self.device
         )
-        self.object_default_pos = self.hand.data.default_root_state[:, 0:3] + quat_apply(
-            self.hand.data.default_root_state[:, 3:7],
-            self.object_palm_local_pos.repeat((self.num_envs, 1)),
+        self.in_hand_palm_local_offset = torch.tensor(
+            self.cfg.in_hand_palm_local_offset, dtype=torch.float, device=self.device
         )
-        self.object_default_pos += self.object_palm_world_offset
-        self.in_hand_pos = self.object_default_pos.clone()
-        self.in_hand_pos[:, 2] -= 0.04
+        self.goal_marker_palm_local_offset = torch.tensor(
+            self.cfg.goal_marker_palm_local_offset, dtype=torch.float, device=self.device
+        )
+        self.object_default_local_pos = self.object_palm_local_pos + self.object_palm_local_offset
+        self.in_hand_local_pos = self.object_palm_local_pos + self.in_hand_palm_local_offset
+        self.goal_marker_local_pos = self.object_palm_local_pos + self.goal_marker_palm_local_offset
+        self.in_hand_pos = self._hand_local_position_to_env(self.in_hand_local_pos)
         # 默认目标位置
         self.goal_rot = torch.zeros((self.num_envs, 4), dtype=torch.float, device=self.device)
         self.goal_rot[:, 0] = 1.0
-        self.goal_pos = torch.zeros((self.num_envs, 3), dtype=torch.float, device=self.device)
-        self.goal_pos[:, :] = torch.tensor([-0.2, -0.45, 0.68], device=self.device)
+        self.goal_pos = self._hand_local_position_to_env(self.goal_marker_local_pos)
         # 初始化目标标记
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
 
@@ -98,6 +99,25 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.x_unit_tensor = torch.tensor([1, 0, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.y_unit_tensor = torch.tensor([0, 1, 0], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
         self.z_unit_tensor = torch.tensor([0, 0, 1], dtype=torch.float, device=self.device).repeat((self.num_envs, 1))
+
+    def _hand_local_position_to_env(self, local_pos: torch.Tensor, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+        if env_ids is None:
+            root_state = self.hand.data.default_root_state
+        else:
+            root_state = self.hand.data.default_root_state[env_ids]
+
+        if local_pos.dim() == 1:
+            local_pos = local_pos.unsqueeze(0).expand(root_state.shape[0], -1)
+
+        return root_state[:, 0:3] + quat_apply(root_state[:, 3:7], local_pos)
+
+    def _hand_local_rotation_to_world(self, local_rot: torch.Tensor, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+        if env_ids is None:
+            root_rot = self.hand.data.default_root_state[:, 3:7]
+        else:
+            root_rot = self.hand.data.default_root_state[env_ids, 3:7]
+
+        return quat_mul(root_rot, local_rot)
 
     def _setup_scene(self):
         """设置场景，添加手部、手部物体和目标物体"""
@@ -250,15 +270,18 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # reset object
         object_default_state = self.object.data.default_root_state.clone()[env_ids]
         pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
+        object_local_pos = self.object_default_local_pos.unsqueeze(0).expand(len(env_ids), -1)
+        object_local_pos = object_local_pos + self.cfg.reset_position_noise * pos_noise
         # global object positions
         object_default_state[:, 0:3] = (
-            self.object_default_pos[env_ids] + self.cfg.reset_position_noise * pos_noise + self.scene.env_origins[env_ids]
+            self._hand_local_position_to_env(object_local_pos, env_ids) + self.scene.env_origins[env_ids]
         )
 
         rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)  # noise for X and Y rotation
-        object_default_state[:, 3:7] = randomize_rotation(
+        object_local_rot = randomize_rotation(
             rot_noise[:, 0], rot_noise[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
+        object_default_state[:, 3:7] = self._hand_local_rotation_to_world(object_local_rot, env_ids)
 
         object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
         self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
@@ -288,9 +311,10 @@ class TesolloDeltoRlEnv(DirectRLEnv):
     def _reset_target_pose(self, env_ids):
         # 重置目标旋转
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
-        new_rot = randomize_rotation(
+        local_rot = randomize_rotation(
             rand_floats[:, 0], rand_floats[:, 1], self.x_unit_tensor[env_ids], self.y_unit_tensor[env_ids]
         )
+        new_rot = self._hand_local_rotation_to_world(local_rot, env_ids)
 
         # 更新目标姿态和标记
         self.goal_rot[env_ids] = new_rot

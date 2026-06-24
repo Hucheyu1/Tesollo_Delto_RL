@@ -33,9 +33,11 @@ TESOLLO_CFG = ArticulationCfg(
     ),
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(0.0, 0.0, 0.60),
-        rot=(0.0, 0.92388, 0.0, 0.38268),  # wxyz  水平向下倾斜45度
+        rot=(0.0, 0.7071068, 0.0, 0.7071068),  # wxyz  掌面 +X 朝上，手指 +Z 朝前
+        # rot=(0.7071068, 0.0, -0.7071068, 0.0),  # wxyz  掌面朝上但手指朝后
+        # rot=(1.0, 0.0, 0.0, 0.0),  # wxyz  USD 原始姿态，掌心朝前
+        # rot=(0.0, 0.92388, 0.0, 0.38268),  # wxyz  水平向下倾斜45度
         # rot=(0.0, 0.86603, 0.0, 0.5),  #wxyz  水平向下倾斜30度
-        # rot=(1., 0., 0., 0.),  #wxyz
         joint_pos={
             "rj_dg_1_1": 0.2,
             "rj_dg_2_1": -0.1,

@@ -128,9 +128,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
             static_friction=1.0,
             dynamic_friction=1.0,
         ),
-        physx=PhysxCfg(
-            bounce_threshold_velocity=0.2,
-        ),
+        physx=PhysxCfg(bounce_threshold_velocity=0.2, gpu_collision_stack_size=2**30),
     )
     # 机器人配置参数
     robot_cfg: ArticulationCfg = TESOLLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
@@ -159,11 +157,11 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     ]
     # 指尖刚体名称列表
     fingertip_body_names = [
-        "rl_dg_1_tip",
-        "rl_dg_2_tip",
-        "rl_dg_3_tip",
-        "rl_dg_4_tip",
-        "rl_dg_5_tip",
+        "rl_dg_1_4",
+        "rl_dg_2_4",
+        "rl_dg_3_4",
+        "rl_dg_4_4",
+        "rl_dg_5_4",
     ]
 
     # in-hand object
@@ -185,12 +183,14 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
             semantic_tags=[("class", "cube")],
         ),
         # This value is overwritten from the robot-relative palm pose on reset.
-        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.084, 0.0, 0.605), rot=(1.0, 0.0, 0.0, 0.0)),
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(-0.1233, 0.0018, 0.6904), rot=(1.0, 0.0, 0.0, 0.0)),
     )
     # DG5F palm center estimated from the USD palm geometry in robot-local coordinates.
     object_palm_local_pos = (-0.0046, 0.0018, 0.1233)
-    # Lift the cube above the palm mesh to avoid reset-time penetration.
-    object_palm_world_offset = (0.0, 0.0, 0.095)
+    # Offsets from the palm center in robot-local coordinates. DG5F's palm normal is local +X.
+    object_palm_local_offset = (0.095, 0.0, 0.0)
+    in_hand_palm_local_offset = (0.055, 0.0, 0.0)
+    goal_marker_palm_local_offset = (0.22, 0.0, 0.0)
     # 目标物体可视化标记配置
     goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
         prim_path="/Visuals/goal_marker",
@@ -203,7 +203,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     )
     # 场景配置参数
     scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=8192, env_spacing=0.75, replicate_physics=True, clone_in_fabric=False
+        num_envs=8192, env_spacing=0.75, replicate_physics=True, clone_in_fabric=True
     )
 
     # reset

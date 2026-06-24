@@ -59,8 +59,7 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         super().__init__(cfg, render_mode, **kwargs)
         # Use the log directory from the configuration
         self.feature_extractor = FeatureExtractor(self.cfg.feature_extractor, self.device, self.cfg.log_dir)
-        # hide goal cubes
-        self.goal_pos[:, :] = torch.tensor([-0.2, 0.1, 0.6], device=self.device)
+        self.goal_pos[:, :] = self._hand_local_position_to_env(self.goal_marker_local_pos)
         # keypoints buffer
         self.gt_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
         self.goal_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
