@@ -103,8 +103,8 @@ class EventCfg:
 @configclass
 class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     # env
-    decimation = 2
-    episode_length_s = 10.0
+    decimation = 4
+    episode_length_s = 5.0
 
     # action / observation
     action_space = 20
@@ -117,7 +117,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     # simulation
     sim: SimulationCfg = SimulationCfg(
         dt=1 / 120,
-        render_interval=decimation,
+        render_interval=1,
         physics_material=RigidBodyMaterialCfg(
             static_friction=0.3,
             dynamic_friction=0.3,
@@ -130,24 +130,24 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     # 20 个可控关节，顺序建议和实机动作顺序保持一致
     hand_joint_names = [
         "rj_dg_1_1",
-        "rj_dg_1_2",
-        "rj_dg_1_3",
-        "rj_dg_1_4",
         "rj_dg_2_1",
-        "rj_dg_2_2",
-        "rj_dg_2_3",
-        "rj_dg_2_4",
         "rj_dg_3_1",
-        "rj_dg_3_2",
-        "rj_dg_3_3",
-        "rj_dg_3_4",
         "rj_dg_4_1",
-        "rj_dg_4_2",
-        "rj_dg_4_3",
-        "rj_dg_4_4",
         "rj_dg_5_1",
+        "rj_dg_1_2",
+        "rj_dg_2_2",
+        "rj_dg_3_2",
+        "rj_dg_4_2",
         "rj_dg_5_2",
+        "rj_dg_1_3",
+        "rj_dg_2_3",
+        "rj_dg_3_3",
+        "rj_dg_4_3",
         "rj_dg_5_3",
+        "rj_dg_1_4",
+        "rj_dg_2_4",
+        "rj_dg_3_4",
+        "rj_dg_4_4",
         "rj_dg_5_4",
     ]
     # action 顺序就使用 hand_joint_names 顺序
@@ -189,7 +189,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/amlrobotics/hcy_ws/Tesollo_Delto_RL_main/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+            usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -202,8 +202,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
             ),
         ),
         init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.11, 0.00267, 0.13),
-            rot=(1.0, 0.0, 0.0, 0.0),
+            pos=(0.107, 0.0, 0.375),
         ),
     )
 
@@ -212,7 +211,6 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         num_envs=2048,
         env_spacing=0.75,
         replicate_physics=True,
-        clone_in_fabric=False,
     )
 
     # 重置配置
@@ -223,8 +221,8 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     reset_dof_pos_noise = 0  # 关节位置重置噪声
     reset_dof_vel_noise = 0  # 关节速度重置噪声
 
-    # 手中目标配置：在物体初始局部位置基础上，沿手掌局部z方向稍微往内
-    in_hand_local_offset = (0.0, 0.0, -0.04)
+    # 手中目标配置：在物体初始局部位置基础上，沿 DG5F 手 root 局部 +X 稍微推向抓取空间
+    in_hand_local_offset = (0.025, 0.0, 0.0)
 
     # 奖励函数配置
     dist_reward_scale = -10.0  # 距离奖励缩放因子
@@ -233,7 +231,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     action_penalty_scale = -0.0002  # 动作惩罚缩放因子
     reach_goal_bonus = 250.0  # 达成目标奖励
     fall_penalty = -50.0  # 物体掉落惩罚
-    fall_dist = 0.24  # 掉落距离阈值
+    fall_dist = 0.15  # 掉落距离阈值
     vel_obs_scale = 0.2  # 速度观测缩放因子
     success_tolerance = 0.1  # 成功容忍度
     max_consecutive_success = 0  # 最大连续成功次数
