@@ -59,6 +59,9 @@ Tesollo_Delto_RL/
 │   ├── rsl_rl/
 │   │   ├── train.py
 │   │   └── play.py
+│   ├── yolo/
+│   │   ├── export_yolo_dataset.py
+│   │   └── train_yolo.py
 │   └── rl_games/
 │       ├── train.py
 │       └── play.py
@@ -82,6 +85,7 @@ Tesollo_Delto_RL/
 | `tesollo_delto_rl_env.py` | Direct RL 环境逻辑，包括 reset、action、reward、observation。 |
 | `tesollo_delto_rl_env_cfg.py` | 主环境配置、物体配置、随机化事件、奖励参数、观测维度。 |
 | `tesollo_delto_rl_vision_env.py` | 带相机和 CNN feature extractor 的视觉版本环境。 |
+| `yolo_pose_estimator.py` | YOLO + RGB-D 的物体位置估计工具，用于仿真到真机迁移实验。 |
 | `agents/rsl_rl_ppo_cfg.py` | RSL-RL PPO、distillation runner、policy 和算法参数。 |
 | `agents/rl_games_ppo_cfg.yaml` | RL-Games PPO 配置。 |
 | `robots/dg5f_right.usd` | DG5F 右手机器人主 USD。 |
@@ -148,6 +152,161 @@ python scripts/rl_games/train.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 
 
 蒸馏、OpenAI 风格观测或视觉任务可将 `--task` 替换为上表中的对应任务名。
 
+## YOLO 视觉流程
+
+YOLO 流程用于把仿真中的视觉感知方式迁移到真机。本项目现在支持两种路径：
+
+- 快速位置估计：YOLO detection/segmentation + RGB-D depth，输出物体 3D 中心位置。
+- 完整姿态估计：YOLO pose 关键点 + 3D 关键点模板 + OpenCV PnP，输出物体位置和四元数姿态。
+
+安装可选依赖：
+
+```bash
+source /root/isaac_ws/IsaacLab/env_isaaclab/bin/activate
+uv pip install ultralytics opencv-python
+```
+
+### 位置估计
+
+从仿真导出 detection 数据集：
+
+```bash
+python scripts/yolo/export_yolo_dataset.py \
+  --task Tesollo-Delto-DG5F-Vision-Direct-v0 \
+  --num_envs 32 \
+  --num_images 5000 \
+  --label_type detect \
+  --output_dir datasets/tesollo_tomato_yolo \
+  --headless
+```
+
+导出目录结构：
+
+```text
+datasets/tesollo_tomato_yolo/
+├── dataset.yaml
+├── images/train
+├── images/val
+├── labels/train
+└── labels/val
+```
+
+训练 YOLO：
+
+```bash
+python scripts/yolo/train_yolo.py \
+  --data datasets/tesollo_tomato_yolo/dataset.yaml \
+  --task_type detect \
+  --epochs 100 \
+  --imgsz 320 \
+  --batch 32 \
+  --device 0
+```
+
+训练完成后，默认权重路径为：
+
+```text
+runs/tesollo_yolo/tomato_detect/weights/best.pt
+```
+
+在仿真中使用 YOLO + depth 估计物体位置：
+
+```python
+from .yolo_pose_estimator import YoloPoseEstimator, YoloPoseEstimatorCfg
+
+self.yolo_pose = YoloPoseEstimator(
+    YoloPoseEstimatorCfg(
+        model_path="runs/tesollo_yolo/tomato_detect/weights/best.pt",
+        class_id=0,
+        confidence_threshold=0.35,
+        device=self.device,
+    )
+)
+
+estimate = self.yolo_pose.estimate_from_tiled_camera(
+    self._tiled_camera.data,
+    env_origins=self.scene.env_origins,
+)
+
+object_pos_from_yolo = estimate.position_env
+valid = estimate.valid
+```
+
+### 完整姿态估计
+
+完整姿态估计需要 YOLO-pose 模型。导出脚本会把仿真物体的 3D 包围盒 8 个角点投影成关键点标签，角点顺序和 `YoloPoseEstimatorCfg(object_size=...)` 内部模板一致。
+
+导出 pose 数据集：
+
+```bash
+python scripts/yolo/export_yolo_dataset.py \
+  --task Tesollo-Delto-DG5F-Vision-Direct-v0 \
+  --num_envs 32 \
+  --num_images 8000 \
+  --label_type pose \
+  --object_size 0.06 0.06 0.06 \
+  --output_dir datasets/tesollo_tomato_yolo_pose \
+  --headless
+```
+
+训练 YOLO-pose：
+
+```bash
+python scripts/yolo/train_yolo.py \
+  --data datasets/tesollo_tomato_yolo_pose/dataset.yaml \
+  --task_type pose \
+  --epochs 150 \
+  --imgsz 320 \
+  --batch 32 \
+  --device 0
+```
+
+默认权重路径：
+
+```text
+runs/tesollo_yolo/tomato_pose/weights/best.pt
+```
+
+使用完整姿态估计：
+
+```python
+from .yolo_pose_estimator import YoloPoseEstimator, YoloPoseEstimatorCfg
+
+self.yolo_pose = YoloPoseEstimator(
+    YoloPoseEstimatorCfg(
+        model_path="runs/tesollo_yolo/tomato_pose/weights/best.pt",
+        class_id=0,
+        confidence_threshold=0.35,
+        object_size=(0.06, 0.06, 0.06),
+        min_keypoints_for_pnp=6,
+        device=self.device,
+    )
+)
+
+estimate = self.yolo_pose.estimate_from_tiled_camera(
+    self._tiled_camera.data,
+    env_origins=self.scene.env_origins,
+)
+
+object_pos_from_yolo = estimate.position_env
+object_quat_from_yolo = estimate.quat_w
+valid = estimate.valid
+```
+
+`quat_w` 使用 Isaac Lab 的 `(w, x, y, z)` 四元数顺序。对于西红柿这种接近球形的物体，外观本身可能没有唯一可观测朝向；代码可以输出完整姿态，但训练效果取决于模型是否能稳定识别出这些仿真关键点。如果实际物体没有明显纹理或几何特征，位置估计通常比姿态更可靠。
+
+真机使用同一个估计器，但需要传入真实 RGB-D 图像、相机内参和手眼标定得到的相机外参：
+
+```python
+estimate = yolo_pose.estimate(
+    rgb=rgb_tensor,
+    depth=depth_tensor,
+    intrinsics=K_tensor,
+    camera_pos_w=camera_pos_w,
+    camera_quat_w=camera_quat_w,
+)
+```
+
 ## 日志与输出
 
 RSL-RL 默认日志目录：
@@ -181,6 +340,9 @@ python -m py_compile \
   source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/agents/rsl_rl_ppo_cfg.py \
   source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/tesollo_delto_rl_env_cfg.py \
   source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/tesollo_delto_rl_vision_env.py \
+  source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/yolo_pose_estimator.py \
+  scripts/yolo/export_yolo_dataset.py \
+  scripts/yolo/train_yolo.py \
   scripts/list_envs.py
 ```
 
