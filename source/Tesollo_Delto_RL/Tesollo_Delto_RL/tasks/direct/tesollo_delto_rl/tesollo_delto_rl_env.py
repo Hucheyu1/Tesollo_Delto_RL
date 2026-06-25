@@ -169,7 +169,7 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         )
 
     def _get_observations(self) -> dict:
-        if self.cfg.obs_type == "openai":
+        if self.cfg.obs_type in ("openai", "distill"):
             obs = self.compute_reduced_observations()
         elif self.cfg.obs_type == "full":
             obs = self.compute_full_observations()

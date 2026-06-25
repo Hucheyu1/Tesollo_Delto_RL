@@ -5,7 +5,14 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import (
+    RslRlDistillationAlgorithmCfg,
+    RslRlDistillationRunnerCfg,
+    RslRlMLPModelCfg,
+    RslRlOnPolicyRunnerCfg,
+    RslRlPpoActorCriticCfg,
+    RslRlPpoAlgorithmCfg,
+)
 
 
 @configclass
@@ -65,6 +72,35 @@ class TesolloDeltoAsymFFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         lam=0.95,
         desired_kl=0.01,
         max_grad_norm=1.0,
+    )
+
+
+@configclass
+class TesolloDeltoDistillRunnerCfg(RslRlDistillationRunnerCfg):
+    num_steps_per_env = 16
+    max_iterations = 10000
+    save_interval = 250
+    experiment_name = "TesolloDelto"
+    run_name = "distill"
+    obs_groups = {"student": ["policy"], "teacher": ["critic"]}
+    student = RslRlMLPModelCfg(
+        hidden_dims=[512, 512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+    )
+    teacher = RslRlMLPModelCfg(
+        hidden_dims=[512, 512, 256, 128],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=1.0),
+    )
+    algorithm = RslRlDistillationAlgorithmCfg(
+        num_learning_epochs=5,
+        learning_rate=5.0e-4,
+        gradient_length=16,
+        max_grad_norm=1.0,
+        loss_type="mse",
     )
 
 

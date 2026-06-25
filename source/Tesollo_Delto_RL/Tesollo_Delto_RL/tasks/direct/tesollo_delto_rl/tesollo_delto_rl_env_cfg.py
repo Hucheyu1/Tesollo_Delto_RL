@@ -260,12 +260,24 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         env_index=0,
     )
 
+@configclass
+class TesolloDeltoRlDistillEnvCfg(TesolloDeltoRlEnvCfg):
+    """基于普通 full-observation 任务动力学的蒸馏环境。
+
+    student 读取 reduced policy observation, teacher 通过 critic group
+    读取 full observation。
+    """
+
+    observation_space = 47
+    state_space = 84
+    asymmetric_obs = True
+    obs_type = "distill"
 
 @configclass
 class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     # env
-    decimation = 3
-    episode_length_s = 8.0
+    decimation = 4
+    episode_length_s = 5.0
 
     action_space = 20
     observation_space = 47
@@ -274,23 +286,17 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     obs_type = "openai"
 
     sim: SimulationCfg = SimulationCfg(
-        dt=1 / 60,
-        render_interval=decimation,
+        dt=1 / 120,
+        render_interval=1,
         physics_material=RigidBodyMaterialCfg(
             static_friction=0.3,
             dynamic_friction=0.3,
         ),
-        physx=PhysxCfg(
-            bounce_threshold_velocity=0.2,
-            gpu_max_rigid_contact_count=2**23,
-            gpu_max_rigid_patch_count=2**23,
-            gpu_collision_stack_size=2**30,
-        ),
     )
 
-    reset_position_noise = 0.01
-    reset_dof_pos_noise = 0.2
-    reset_dof_vel_noise = 0.0
+    reset_position_noise = 0
+    reset_dof_pos_noise = 0
+    reset_dof_vel_noise = 0
 
     dist_reward_scale = -10.0
     rot_reward_scale = 1.0
