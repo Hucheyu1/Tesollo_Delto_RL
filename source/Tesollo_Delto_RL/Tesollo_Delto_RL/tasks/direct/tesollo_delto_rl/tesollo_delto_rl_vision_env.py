@@ -39,8 +39,8 @@ class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
     feature_extractor = FeatureExtractorCfg()
 
     # env
-    observation_space = 156 + 27  # proprioception + goal keypoints + vision CNN embedding
-    state_space = 179 + 27  # asymettric states + vision CNN embedding
+    observation_space = 118  # proprioception + goal keypoints + vision CNN embedding
+    state_space = 111  # asymmetric states + vision CNN embedding
 
 
 @configclass
@@ -123,10 +123,6 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
                 # goal
                 self.in_hand_pos,
                 self.goal_rot,
-                # fingertips
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
                 # actions
                 self.actions,
             ),
@@ -146,8 +142,6 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         # vision observations from CMM
         image_obs = self._compute_image_observations()
         obs = torch.cat((state_obs, image_obs), dim=-1)
-        # asymmetric critic states
-        self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[:, self.finger_bodies]
         state = self._compute_states()
 
         observations = {"policy": obs, "critic": state}

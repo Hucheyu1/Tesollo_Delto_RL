@@ -1,9 +1,8 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers 
+# Copyright (c) 2022-2026, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
-
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
 from isaaclab.envs import DirectRLEnvCfg, ViewerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -13,7 +12,6 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 from .delto_cfg import TESOLLO_CFG
@@ -111,7 +109,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
 
     # action / observation
     action_space = 20
-    observation_space = 149
+    observation_space = 84
     state_space = 0
     asymmetric_obs = False
     obs_type = "full"
@@ -124,7 +122,13 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         physics_material=RigidBodyMaterialCfg(
             static_friction=0.3,
             dynamic_friction=0.3,
-        )
+        ),
+        # physx=PhysxCfg(
+        #     bounce_threshold_velocity=0.2,
+        #     gpu_max_rigid_contact_count=2**23,
+        #     gpu_max_rigid_patch_count=2**23,
+        #     gpu_collision_stack_size=2**30,
+        # ),
     )
 
     # robot
@@ -132,30 +136,64 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
 
     # 20 个可控关节，顺序建议和实机动作顺序保持一致
     hand_joint_names = [
-        "rj_dg_1_1", "rj_dg_2_1", "rj_dg_3_1", "rj_dg_4_1", "rj_dg_5_1",
-        "rj_dg_1_2", "rj_dg_2_2", "rj_dg_3_2", "rj_dg_4_2", "rj_dg_5_2",
-        "rj_dg_1_3", "rj_dg_2_3", "rj_dg_3_3", "rj_dg_4_3", "rj_dg_5_3",
-        "rj_dg_1_4", "rj_dg_2_4", "rj_dg_3_4", "rj_dg_4_4", "rj_dg_5_4",
+        "rj_dg_1_1",
+        "rj_dg_2_1",
+        "rj_dg_3_1",
+        "rj_dg_4_1",
+        "rj_dg_5_1",
+        "rj_dg_1_2",
+        "rj_dg_2_2",
+        "rj_dg_3_2",
+        "rj_dg_4_2",
+        "rj_dg_5_2",
+        "rj_dg_1_3",
+        "rj_dg_2_3",
+        "rj_dg_3_3",
+        "rj_dg_4_3",
+        "rj_dg_5_3",
+        "rj_dg_1_4",
+        "rj_dg_2_4",
+        "rj_dg_3_4",
+        "rj_dg_4_4",
+        "rj_dg_5_4",
     ]
     # action 顺序就使用 hand_joint_names 顺序
     actuated_joint_names = hand_joint_names
 
     # 初始关节位置，单位：rad
-    hand_position = [0.1, 0.0, 0.0, 0.0, 0.0,-1.7, 0.5, 0.5, 0.5, 0.0, 0.7, 0.7, 0.7, 0.7, 1.57, 0.3, 1.0, 1.0, 1.0, 1.57]
+    hand_position = [
+        0.1,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        -1.7,
+        0.5,
+        0.5,
+        0.5,
+        0.0,
+        0.7,
+        0.7,
+        0.7,
+        0.7,
+        1.57,
+        0.3,
+        1.0,
+        1.0,
+        1.0,
+        1.57,
+    ]
     # 关节上限，单位：deg
     hand_upper_limits = [50, 35, 30, 24, 60, 0, 115, 112, 109, 35, 90, 90, 90, 90, 90, 90, 90, 90, 90, 90]
     # 关节下限，单位：deg
     hand_lower_limits = [-22, -24, -30, -35, 0, -150, 0, 0, 0, -24, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
     # 是否使用上面手动配置的关节初始位置和上下限
     use_manual_joint_cfg = True
-    # 这个名字必须和 USD 里的 body name 一致
-    fingertip_body_names = ["rl_dg_1_4","rl_dg_2_4","rl_dg_3_4","rl_dg_4_4","rl_dg_5_4"]
-
     # object
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/home/amlrobotics/hcy_ws/Tesollo_Delto_RL_main/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+            usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -184,8 +222,8 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     # reset_dof_pos_noise = 0.2  # 关节位置重置噪声
     # reset_dof_vel_noise = 0.0  # 关节速度重置噪声
     reset_position_noise = 0  # 位置重置噪声
-    reset_dof_pos_noise = 0 # 关节位置重置噪声
-    reset_dof_vel_noise = 0 # 关节速度重置噪声
+    reset_dof_pos_noise = 0  # 关节位置重置噪声
+    reset_dof_vel_noise = 0  # 关节速度重置噪声
 
     # 手中目标配置：在物体初始局部位置基础上，沿手掌局部z方向稍微往内
     in_hand_local_offset = (-0.02, 0.0, -0.03)
@@ -203,14 +241,13 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     max_consecutive_success = 0  # 最大连续成功次数
     av_factor = 0.1  # 平均因子
     act_moving_average = 1.0  # 动作移动平均因子
-    force_torque_obs_scale = 10.0  # 力/力矩观测缩放因子
 
     # 目标物体可视化 marker：使用 tomato 作为目标姿态显示
     goal_object_cfg: VisualizationMarkersCfg = VisualizationMarkersCfg(
         prim_path="/Visuals/goal_marker",
         markers={
             "goal": sim_utils.UsdFileCfg(
-                usd_path="/home/amlrobotics/hcy_ws/Tesollo_Delto_RL_main/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+                usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
                 scale=(1.0, 1.0, 1.0),
             )
         },
@@ -223,6 +260,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         env_index=0,
     )
 
+
 @configclass
 class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     # env
@@ -230,8 +268,8 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     episode_length_s = 8.0
 
     action_space = 20
-    observation_space = 42
-    state_space = 179
+    observation_space = 47
+    state_space = 84
     asymmetric_obs = True
     obs_type = "openai"
 
@@ -246,6 +284,7 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
             bounce_threshold_velocity=0.2,
             gpu_max_rigid_contact_count=2**23,
             gpu_max_rigid_patch_count=2**23,
+            gpu_collision_stack_size=2**30,
         ),
     )
 
@@ -265,7 +304,6 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     max_consecutive_success = 50
     av_factor = 0.1
     act_moving_average = 0.3
-    force_torque_obs_scale = 10.0
 
     events: EventCfg = EventCfg()
 

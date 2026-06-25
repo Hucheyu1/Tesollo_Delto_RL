@@ -7,9 +7,9 @@
 - 机器人资产已切换为 `source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/dg5f_right.usd`。
 - DG5F 右手配置位于 `tasks/direct/tesollo_delto_rl/delto_cfg.py`，包含 USD 加载、初始姿态、关节初始值和 actuator 设置。
 - 主环境配置位于 `tasks/direct/tesollo_delto_rl/tesollo_delto_rl_env_cfg.py`。
-- 普通策略观测维度为 `149`，动作维度为 `20`。
-- OpenAI 风格观测维度为 `42`，critic state 维度为 `179`。
-- 视觉环境配置位于 `tasks/direct/tesollo_delto_rl/tesollo_delto_rl_vision_env.py`，policy observation 为 `156 + 27`，critic state 为 `179 + 27`。
+- 普通策略观测维度为 `84`，动作维度为 `20`。
+- OpenAI 风格观测维度为 `47`，critic state 维度为 `84`。
+- 视觉环境配置位于 `tasks/direct/tesollo_delto_rl/tesollo_delto_rl_vision_env.py`，policy observation 为 `118`，critic state 为 `111`。
 - Gym 任务注册入口已整理到 `tasks/direct/tesollo_delto_rl/__init__.py`，任务名前缀为 `Tesollo-Delto-DG5F`。
 
 ## 已注册任务
@@ -84,7 +84,7 @@ Tesollo_Delto_RL/
 | `agents/rl_games_ppo_cfg.yaml` | RL-Games PPO 配置。 |
 | `robots/dg5f_right.usd` | DG5F 右手机器人主 USD。 |
 
-## DG5F 关节与指尖
+## DG5F 关节
 
 当前环境控制 20 个 DG5F revolute joints：
 
@@ -96,15 +96,7 @@ rj_dg_4_1, rj_dg_4_2, rj_dg_4_3, rj_dg_4_4
 rj_dg_5_1, rj_dg_5_2, rj_dg_5_3, rj_dg_5_4
 ```
 
-用于 fingertip observation/contact force 的 5 个刚体为：
-
-```text
-rl_dg_1_tip
-rl_dg_2_tip
-rl_dg_3_tip
-rl_dg_4_tip
-rl_dg_5_tip
-```
+当前观测不再读取指尖刚体状态或指尖接触力。OpenAI 风格 reduced observation 使用 `hand_dof_pos` 替代原来的指尖位置，full observation/state 只保留关节、物体、目标和动作相关量。
 
 ## 常用命令
 

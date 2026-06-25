@@ -40,14 +40,8 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.actuated_dof_indices = []
         for joint_name in cfg.actuated_joint_names:
             self.actuated_dof_indices.append(self.hand.joint_names.index(joint_name))
-        # fingertip bodies - 手指体
-        self.finger_bodies = []
-        for body_name in self.cfg.fingertip_body_names:
-            self.finger_bodies.append(self.hand.body_names.index(body_name))
         print(f"Available joints: {self.hand.joint_names}")
         print(f"Available bodies: {self.hand.body_names}")
-
-        self.num_fingertips = len(self.finger_bodies)
 
         # joint limits - 关节限制
         joint_pos_limits = self.hand.root_physx_view.get_dof_limits().to(self.device)
@@ -126,10 +120,6 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         for action_id, joint_id in enumerate(self.actuated_dof_indices):
             print(f"action[{action_id:02d}] -> joint_id={joint_id:02d}, name={self.hand.joint_names[joint_id]}")
 
-        print("==== Fingertip body mapping ====")
-        for finger_id, body_id in enumerate(self.finger_bodies):
-            print(f"finger[{finger_id}] -> body_id={body_id:02d}, name={self.hand.body_names[body_id]}")
-
     def _setup_scene(self):
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
@@ -179,11 +169,6 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         )
 
     def _get_observations(self) -> dict:
-        if self.cfg.asymmetric_obs:
-            self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[
-                :, self.finger_bodies
-            ]
-
         if self.cfg.obs_type == "openai":
             obs = self.compute_reduced_observations()
         elif self.cfg.obs_type == "full":
@@ -388,18 +373,6 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.reset_goal_buf[env_ids] = 0
 
     def _compute_intermediate_values(self):
-        # 计算手指尖数据
-        # 获取手指身体在世界坐标系中的位置和旋转
-        self.fingertip_pos = self.hand.data.body_pos_w[:, self.finger_bodies]
-        self.fingertip_rot = self.hand.data.body_quat_w[:, self.finger_bodies]
-        # 将手指尖位置相对于环境原点进行偏移
-        self.fingertip_pos -= self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(
-            self.num_envs,
-            self.num_fingertips,
-            3,
-        )
-        # 获取手指尖在世界坐标系中的速度
-        self.fingertip_velocities = self.hand.data.body_vel_w[:, self.finger_bodies]
         # 获取手部关节位置和速度数据
         self.hand_dof_pos = self.hand.data.joint_pos
         self.hand_dof_vel = self.hand.data.joint_vel
@@ -419,7 +392,7 @@ class TesolloDeltoRlEnv(DirectRLEnv):
     def compute_reduced_observations(self):
         obs = torch.cat(
             (
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+                self.hand_dof_pos,
                 self.object_pos,
                 quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
                 self.actions,
@@ -443,10 +416,6 @@ class TesolloDeltoRlEnv(DirectRLEnv):
                 self.in_hand_pos,
                 self.goal_rot,
                 quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                # fingertips
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
                 # actions
                 self.actions,
             ),
@@ -465,16 +434,10 @@ class TesolloDeltoRlEnv(DirectRLEnv):
                 self.object_rot,
                 self.object_linvel,
                 self.cfg.vel_obs_scale * self.object_angvel,
-                # goal 
+                # goal
                 self.in_hand_pos,
                 self.goal_rot,
                 quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                # fingertips
-                self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                self.cfg.force_torque_obs_scale
-                * self.fingertip_force_sensors.view(self.num_envs, self.num_fingertips * 6),
                 # actions
                 self.actions,
             ),
