@@ -1,0 +1,57 @@
+seed: 42
+device: cuda:0
+num_steps_per_env: 16
+max_iterations: 10000
+empirical_normalization: {}
+obs_groups:
+  student:
+  - policy
+  teacher:
+  - critic
+clip_actions: null
+check_for_nan: true
+save_interval: 250
+experiment_name: TesolloDelto
+run_name: distill
+logger: tensorboard
+neptune_project: isaaclab
+wandb_project: isaaclab
+resume: false
+load_run: 2026-06-25_15-36-45
+load_checkpoint: model_9999.pt
+class_name: DistillationRunner
+student:
+  class_name: MLPModel
+  hidden_dims:
+  - 512
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  distribution_cfg:
+    class_name: GaussianDistribution
+    init_std: 1.0
+    std_type: scalar
+teacher:
+  class_name: MLPModel
+  hidden_dims:
+  - 512
+  - 512
+  - 256
+  - 128
+  activation: elu
+  obs_normalization: true
+  distribution_cfg:
+    class_name: GaussianDistribution
+    init_std: 1.0
+    std_type: scalar
+algorithm:
+  class_name: Distillation
+  num_learning_epochs: 5
+  learning_rate: 0.0005
+  gradient_length: 16
+  max_grad_norm: 1.0
+  optimizer: adam
+  loss_type: mse
+policy: {}
