@@ -23,18 +23,28 @@ from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
 @configclass
 class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=1225, env_spacing=2.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=256, env_spacing=1.0, replicate_physics=True)
 
     # camera
+    # YOLO 数据采集需要目标在画面中足够大、且能看到手心中的物体。
+    # 这里将相机放在手前上方，使用 world convention: 相机局部 +X 朝向目标、+Z 尽量朝上。
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
-        offset=TiledCameraCfg.OffsetCfg(pos=(0, -0.35, 1.0), rot=(0.7071, 0.0, 0.7071, 0.0), convention="world"),
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.35, -0.50, 0.70),
+            rot=(0.508068, -0.218646, 0.135131, 0.822071),
+            convention="world",
+        ),
         data_types=["rgb", "depth", "semantic_segmentation"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=24.0, focus_distance=400.0, horizontal_aperture=20.955, clipping_range=(0.1, 20.0)
+            focal_length=18.0,
+            focus_distance=0.7,
+            horizontal_aperture=20.955,
+            clipping_range=(0.02, 2.0),
         ),
-        width=120,
-        height=120,
+        width=256,
+        height=256,
+        update_latest_camera_pose=True,
     )
     feature_extractor = FeatureExtractorCfg()
 
@@ -58,7 +68,13 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         super().__init__(cfg, render_mode, **kwargs)
         # Use the log directory from the configuration
         self.feature_extractor = FeatureExtractor(self.cfg.feature_extractor, self.device, self.cfg.log_dir)
-        self.goal_pos[:, :] = self._hand_local_position_to_env(self.goal_marker_local_pos)
+        self.embeddings = torch.zeros((self.num_envs, 27), dtype=torch.float32, device=self.device)
+        # YOLO 数据集中只应该出现真实被抓物体；将 goal marker 隐藏到相机视野外，避免生成伪目标。
+        self.hidden_goal_pos = torch.tensor((-10.0, -10.0, -10.0), dtype=torch.float32, device=self.device).repeat(
+            self.num_envs, 1
+        )
+        self.goal_pos[:, :] = self.hidden_goal_pos
+        self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
         # keypoints buffer
         self.gt_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
         self.goal_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
@@ -84,15 +100,19 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
 
         object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
 
-        # train CNN to regress on keypoint positions
-        pose_loss, embeddings = self.feature_extractor.step(
-            self._tiled_camera.data.output["rgb"],
-            self._tiled_camera.data.output["depth"],
-            self._tiled_camera.data.output["semantic_segmentation"][..., :3],
-            object_pose,
-        )
+        rgb = self._tiled_camera.data.output["rgb"]
 
-        self.embeddings = embeddings.clone().detach()
+        # export_yolo_dataset.py 会关闭 CNN 训练/加载。此时环境只负责渲染图像和提供真值标签，
+        # 直接返回零 embedding，避免旧 CNN 的 120x120 固定输入限制影响 YOLO 数据采集。
+        if not self.cfg.feature_extractor.train and not self.cfg.feature_extractor.load_checkpoint:
+            pose_loss = torch.zeros((), dtype=torch.float32, device=self.device)
+            self.embeddings.zero_()
+        else:
+            depth = self._tiled_camera.data.output["depth"]
+            semantic = self._tiled_camera.data.output["semantic_segmentation"][..., :3]
+            # train CNN to regress on keypoint positions
+            pose_loss, embeddings = self.feature_extractor.step(rgb, depth, semantic, object_pose)
+            self.embeddings = embeddings.clone().detach()
         # compute keypoints for goal cube
         compute_keypoints(
             pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=-1), out=self.goal_keypoints
@@ -112,6 +132,14 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         self.extras["log"]["pose_loss"] = pose_loss
 
         return obs
+
+    def _reset_target_pose(self, env_ids):
+        super()._reset_target_pose(env_ids)
+        if not hasattr(self, "hidden_goal_pos"):
+            return
+        # 父类会把 goal marker 放回手附近；视觉采集环境中再次隐藏，避免相机看到第二个物体。
+        self.goal_pos[env_ids] = self.hidden_goal_pos[env_ids]
+        self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
 
     def _compute_proprio_observations(self):
         """Proprioception observations from physics."""
