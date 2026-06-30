@@ -29,7 +29,7 @@
 推荐使用已有 Isaac Lab 环境：
 
 ```bash
-source /root/isaac_ws/IsaacLab/env_isaaclab/bin/activate
+source /root/gpufree-data/isaac_ws/IsaacLab/env_isaaclab/bin/activate
 ```
 
 项目依赖 Isaac Lab、Isaac Sim、PyTorch、RSL-RL、RL-Games 等组件。若没有现成环境，请先按照 Isaac Lab 官方安装流程安装 Isaac Lab，并确认 `isaaclab.sh -p` 或当前 Python 解释器能够 import Isaac Lab。

@@ -23,7 +23,7 @@ from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
 @configclass
 class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
     # scene
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=256, env_spacing=1.0, replicate_physics=True)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=256, env_spacing=2.0, replicate_physics=True)
 
     # camera
     # YOLO 数据采集需要目标在画面中足够大、且能看到手心中的物体。
@@ -31,26 +31,28 @@ class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
         offset=TiledCameraCfg.OffsetCfg(
-            pos=(0.35, -0.50, 0.70),
+            pos=(0.28, -0.35, 0.60),
             rot=(0.508068, -0.218646, 0.135131, 0.822071),
             convention="world",
         ),
         data_types=["rgb", "depth", "semantic_segmentation"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=18.0,
-            focus_distance=0.7,
+            focus_distance=0.45,
             horizontal_aperture=20.955,
-            clipping_range=(0.02, 2.0),
+            clipping_range=(0.01, 1.5),
         ),
-        width=256,
-        height=256,
+        width=120,
+        height=120,
         update_latest_camera_pose=True,
     )
     feature_extractor = FeatureExtractorCfg()
 
     # env
-    observation_space = 118  # proprioception + goal keypoints + vision CNN embedding
+    observation_space = 118  # proprioception + goal keypoints(24) + vision CNN embedding(27)
     state_space = 111  # asymmetric states + vision CNN embedding
+
+    debug_visualization = False
 
 
 @configclass
@@ -60,33 +62,35 @@ class TesolloDeltoRlVisionEnvPlayCfg(TesolloDeltoRlVisionEnvCfg):
     # inference for CNN
     feature_extractor = FeatureExtractorCfg(train=False, load_checkpoint=True)
 
+    debug_visualization = True
+
 
 class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
     cfg: TesolloDeltoRlVisionEnvCfg
 
     def __init__(self, cfg: TesolloDeltoRlVisionEnvCfg, render_mode: str | None = None, **kwargs):
         super().__init__(cfg, render_mode, **kwargs)
-        # Use the log directory from the configuration
+        # 使用配置中的日志目录
         self.feature_extractor = FeatureExtractor(self.cfg.feature_extractor, self.device, self.cfg.log_dir)
         self.embeddings = torch.zeros((self.num_envs, 27), dtype=torch.float32, device=self.device)
+        # 关键点缓冲区
+        self.gt_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
+        self.goal_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
         # YOLO 数据集中只应该出现真实被抓物体；将 goal marker 隐藏到相机视野外，避免生成伪目标。
         self.hidden_goal_pos = torch.tensor((-10.0, -10.0, -10.0), dtype=torch.float32, device=self.device).repeat(
             self.num_envs, 1
         )
         self.goal_pos[:, :] = self.hidden_goal_pos
         self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
-        # keypoints buffer
-        self.gt_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
-        self.goal_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
 
     def _setup_scene(self):
-        # add hand, in-hand object, and goal object
+        # 添加手部、手内物体和目标物体
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
         self._tiled_camera = TiledCamera(self.cfg.tiled_camera)
-        # clone and replicate (no need to filter for this environment)
+        # 克隆和复制（此环境中不需要过滤）
         self.scene.clone_environments(copy_from_source=False)
-        # add articulation to scene - we must register to scene to randomize with EventManager
+        # 将关节体添加到场景中 - 我们必须注册到场景以使用EventManager进行随机化
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
         self.scene.sensors["tiled_camera"] = self._tiled_camera
@@ -95,7 +99,7 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         light_cfg.func("/World/Light", light_cfg)
 
     def _compute_image_observations(self):
-        # generate ground truth keypoints for in-hand cube
+        # 生成手内立方体的地面真值关键点
         compute_keypoints(pose=torch.cat((self.object_pos, self.object_rot), dim=1), out=self.gt_keypoints)
 
         object_pose = torch.cat([self.object_pos, self.gt_keypoints.view(-1, 24)], dim=-1)
@@ -113,7 +117,7 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
             # train CNN to regress on keypoint positions
             pose_loss, embeddings = self.feature_extractor.step(rgb, depth, semantic, object_pose)
             self.embeddings = embeddings.clone().detach()
-        # compute keypoints for goal cube
+        # 计算目标立方体的关键点
         compute_keypoints(
             pose=torch.cat((torch.zeros_like(self.goal_pos), self.goal_rot), dim=-1), out=self.goal_keypoints
         )
@@ -142,7 +146,7 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         self.goal_markers.visualize(self.goal_pos + self.scene.env_origins, self.goal_rot)
 
     def _compute_proprio_observations(self):
-        """Proprioception observations from physics."""
+        """从物理计算本体感知观测值"""
         obs = torch.cat(
             (
                 # hand
@@ -159,7 +163,7 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         return obs
 
     def _compute_states(self):
-        """Asymmetric states for the critic."""
+        """为critic计算非对称状态"""
         sim_states = self.compute_full_state()
         state = torch.cat((sim_states, self.embeddings), dim=-1)
         return state
@@ -183,13 +187,16 @@ def compute_keypoints(
     size: tuple[float, float, float] = (2 * 0.03, 2 * 0.03, 2 * 0.03),
     out: torch.Tensor | None = None,
 ):
-    """Computes positions of 8 corner keypoints of a cube.
+    """计算立方体8个角点关键点的位置
 
-    Args:
-        pose: Position and orientation of the center of the cube. Shape is (N, 7)
-        num_keypoints: Number of keypoints to compute. Default = 8
-        size: Length of X, Y, Z dimensions of cube. Default = [0.06, 0.06, 0.06]
-        out: Buffer to store keypoints. If None, a new buffer will be created.
+    参数:
+        pose: 立方体中心的位置和方向。形状为 (N, 7)
+        num_keypoints: 要计算的关键点数量。默认 = 8
+        size: 立方体X、Y、Z维度的长度。默认 = [0.06, 0.06, 0.06]
+        out: 存储关键点的缓冲区。如果为None, 则创建新缓冲区。
+
+    返回值:
+        包含关键点坐标的张量，形状为 (N, num_keypoints, 3)
     """
     num_envs = pose.shape[0]
     if out is None:
@@ -197,11 +204,11 @@ def compute_keypoints(
     else:
         out[:] = 1.0
     for i in range(num_keypoints):
-        # which dimensions to negate
+        # 哪些维度需要取反
         n = [((i >> k) & 1) == 0 for k in range(3)]
         corner_loc = ([(1 if n[k] else -1) * s / 2 for k, s in enumerate(size)],)
         corner = torch.tensor(corner_loc, dtype=torch.float32, device=pose.device) * out[:, i, :]  # type: ignore
-        # express corner position in the world frame
+        # 将角点位置表示在世界坐标系中
         out[:, i, :] = pose[:, :3] + quat_apply(pose[:, 3:7], corner)  # type: ignore
 
     return out

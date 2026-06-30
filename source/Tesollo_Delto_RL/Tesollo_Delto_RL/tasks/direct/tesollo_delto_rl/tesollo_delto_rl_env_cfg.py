@@ -109,11 +109,13 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
 
     # action / observation
     action_space = 20
-    observation_space = 84
+    observation_space = 84 + 10
     state_space = 0
     asymmetric_obs = False
     obs_type = "full"
     action_scale = 0.1
+    # 触觉二值化
+    contact_threshold = 1
 
     # simulation
     sim: SimulationCfg = SimulationCfg(
@@ -133,6 +135,9 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
 
     # robot
     robot_cfg: ArticulationCfg = TESOLLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
+
+    fingertip_body_names = [ "rl_dg_1_3","rl_dg_1_4","rl_dg_2_2","rl_dg_2_3","rl_dg_3_2"
+                            "rl_dg_3_3","rl_dg_4_2","rl_dg_4_3","rl_dg_5_3","rl_dg_5_4"]
 
     # 20 个可控关节，顺序建议和实机动作顺序保持一致
     hand_joint_names = [
@@ -194,6 +199,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.UsdFileCfg(
             usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+            semantic_tags=[("class", "tomato")],
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
                 disable_gravity=False,
@@ -260,6 +266,8 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         env_index=0,
     )
 
+    debug_visualization = True
+
 @configclass
 class TesolloDeltoRlDistillEnvCfg(TesolloDeltoRlEnvCfg):
     """基于普通 full-observation 任务动力学的蒸馏环境。
@@ -268,8 +276,8 @@ class TesolloDeltoRlDistillEnvCfg(TesolloDeltoRlEnvCfg):
     读取 full observation。
     """
 
-    observation_space = 47
-    state_space = 84
+    observation_space = 47 + 10
+    state_space = 84 + 10
     asymmetric_obs = True
     obs_type = "distill"
 
@@ -280,8 +288,8 @@ class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):
     episode_length_s = 5.0
 
     action_space = 20
-    observation_space = 47
-    state_space = 84
+    observation_space = 47 + 10
+    state_space = 84 + 10
     asymmetric_obs = True
     obs_type = "openai"
 

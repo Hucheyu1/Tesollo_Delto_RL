@@ -40,6 +40,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.actuated_dof_indices = []
         for joint_name in cfg.actuated_joint_names:
             self.actuated_dof_indices.append(self.hand.joint_names.index(joint_name))
+        # fingertip bodies - 手指体
+        self.finger_bodies = []
+        for body_name in self.cfg.fingertip_body_names:
+            self.finger_bodies.append(self.hand.body_names.index(body_name))
+        self.num_fingertips = len(self.finger_bodies)
         print(f"Available joints: {self.hand.joint_names}")
         print(f"Available bodies: {self.hand.body_names}")
 
@@ -101,10 +106,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # goal marker 目标标记
         self.goal_markers = VisualizationMarkers(self.cfg.goal_object_cfg)
         # 坐标轴可视化
-        frame_marker_cfg = FRAME_MARKER_CFG.copy()
-        frame_marker_cfg.prim_path = "/Visuals/debug_frames"
-        frame_marker_cfg.markers["frame"].scale = (0.05, 0.05, 0.05)
-        self.frame_markers = VisualizationMarkers(frame_marker_cfg)
+        if getattr(self.cfg, "debug_visualization", False):
+            frame_marker_cfg = FRAME_MARKER_CFG.copy()
+            frame_marker_cfg.prim_path = "/Visuals/debug_frames"
+            frame_marker_cfg.markers["frame"].scale = (0.05, 0.05, 0.05)
+            self.frame_markers = VisualizationMarkers(frame_marker_cfg)
 
         # track successes 跟踪成功次数
         self.successes = torch.zeros(self.num_envs, dtype=torch.float, device=self.device)
@@ -248,92 +254,6 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
         return out_of_reach, time_out
 
-    # def _reset_idx(self, env_ids: Sequence[int] | None):
-    #     if env_ids is None:
-    #         env_ids = self.hand._ALL_INDICES # type: ignore
-
-    #     super()._reset_idx(env_ids)
-
-    #     # ---------------------------------------------------------------------
-    #     # Update hand-base pose
-    #     # 当前版本手 root 是 fix_root_link=True，所以这里主要读取默认 root pose。
-    #     # 如果以后你要随机手掌朝向，也应该先在这里改 hand root pose，再更新这些变量。
-    #     # ---------------------------------------------------------------------
-    #     self.hand_base_pos[env_ids] = self.hand.data.default_root_state[env_ids, 0:3]
-    #     self.hand_base_rot[env_ids] = self.hand.data.default_root_state[env_ids, 3:7]
-
-    #     # 更新手部目标在环境局部坐标系中的位置
-    #     self.in_hand_pos[env_ids] = self.hand_base_pos[env_ids] + quat_apply(
-    #         self.hand_base_rot[env_ids],
-    #         self.in_hand_local_pos[env_ids],
-    #     )
-
-    #     # ---------------------------------------------------------------------
-    #     # 基于手部根部局部位置重置物体
-    #     # ---------------------------------------------------------------------
-    #     object_default_state = self.object.data.default_root_state.clone()[env_ids]
-
-    #     pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 3), device=self.device)
-    #     object_local_pos = self.object_local_pos[env_ids] + self.cfg.reset_position_noise * pos_noise
-
-    #     object_pos_env = self.hand_base_pos[env_ids] + quat_apply(
-    #         self.hand_base_rot[env_ids],
-    #         object_local_pos,
-    #     )
-
-    #     object_default_state[:, 0:3] = object_pos_env + self.scene.env_origins[env_ids]
-
-    #     # 在手部根部局部坐标系中随机物体旋转
-    #     rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
-    #     object_rot_local = randomize_rotation(
-    #         rot_noise[:, 0],
-    #         rot_noise[:, 1],
-    #         self.x_unit_tensor[env_ids],
-    #         self.y_unit_tensor[env_ids],
-    #     )
-
-    #     object_default_state[:, 3:7] = quat_mul(
-    #         self.hand_base_rot[env_ids],
-    #         object_rot_local,
-    #     )
-
-    #     object_default_state[:, 7:] = torch.zeros_like(self.object.data.default_root_state[env_ids, 7:])
-
-    #     self.object.write_root_pose_to_sim(object_default_state[:, :7], env_ids)
-    #     self.object.write_root_velocity_to_sim(object_default_state[:, 7:], env_ids)
-
-    #     # ---------------------------------------------------------------------
-    #     # 重置手部关节
-    #     # ---------------------------------------------------------------------
-    #     delta_max = self.hand_dof_upper_limits[env_ids] - self.default_hand_dof_pos[env_ids]
-    #     delta_min = self.hand_dof_lower_limits[env_ids] - self.default_hand_dof_pos[env_ids]
-
-    #     dof_pos_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-    #     rand_delta = delta_min + (delta_max - delta_min) * 0.5 * dof_pos_noise
-    #     dof_pos = self.default_hand_dof_pos[env_ids] + self.cfg.reset_dof_pos_noise * rand_delta
-    #     dof_pos = saturate(dof_pos,self.hand_dof_lower_limits[env_ids],self.hand_dof_upper_limits[env_ids])
-
-    #     dof_vel_noise = sample_uniform(-1.0, 1.0, (len(env_ids), self.num_hand_dofs), device=self.device)
-    #     dof_vel = self.hand.data.default_joint_vel[env_ids] + self.cfg.reset_dof_vel_noise * dof_vel_noise
-
-    #     self.target_pos[env_ids] = dof_pos
-    #     self.prev_targets[env_ids] = dof_pos
-    #     self.cur_targets[env_ids] = dof_pos
-    #     self.hand_dof_targets[env_ids] = dof_pos
-
-    #     self.raw_actions[env_ids] = 0.0
-    #     self.actions[env_ids] = 0.0
-
-    #     self.hand.set_joint_position_target(dof_pos, env_ids=env_ids)
-    #     self.hand.write_joint_state_to_sim(dof_pos, dof_vel, env_ids=env_ids)
-
-    #     self.successes[env_ids] = 0
-
-    #     # 在手/物体姿态更新后重置目标姿态
-    #     self._reset_target_pose(env_ids)
-
-    #     self._compute_intermediate_values()
-
     def _reset_target_pose(self, env_ids):
         # 目标旋转在手部-根部局部坐标系中
         # 生成均匀分布的随机数用于随机化旋转
@@ -373,6 +293,25 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.reset_goal_buf[env_ids] = 0
 
     def _compute_intermediate_values(self):
+        # 计算手指尖数据
+        # 获取手指身体在世界坐标系中的位置和旋转
+        self.fingertip_pos = self.hand.data.body_pos_w[:, self.finger_bodies]
+        self.fingertip_rot = self.hand.data.body_quat_w[:, self.finger_bodies]
+        # 将手指尖位置相对于环境原点进行偏移
+        self.fingertip_pos -= self.scene.env_origins.repeat((1, self.num_fingertips)).reshape(
+            self.num_envs,
+            self.num_fingertips,
+            3,
+        )
+        # 获取手指尖在世界坐标系中的速度
+        self.fingertip_velocities = self.hand.data.body_vel_w[:, self.finger_bodies]
+        # 计算手指body的力传感器数据
+        self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[
+                :, self.finger_bodies
+            ]
+        force_norms = torch.norm(self.fingertip_force_sensors[:,:,:3], dim=2)
+        self.fingertip_force_binary_results = (force_norms > self.cfg.contact_threshold).int() 
+
         # 获取手部关节位置和速度数据
         self.hand_dof_pos = self.hand.data.joint_pos
         self.hand_dof_vel = self.hand.data.joint_vel
@@ -392,9 +331,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
     def compute_reduced_observations(self):
         obs = torch.cat(
             (
-                self.hand_dof_pos,
+                unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
                 self.object_pos,
-                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                # quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                self.goal_rot,
+                self.fingertip_force_binary_results, # 10
                 self.actions,
             ),
             dim=-1,
@@ -416,6 +357,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
                 self.in_hand_pos,
                 self.goal_rot,
                 quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                # fingertips
+                # self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+                # self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+                # self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
+                self.fingertip_force_binary_results, # 10
                 # actions
                 self.actions,
             ),
@@ -438,6 +384,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
                 self.in_hand_pos,
                 self.goal_rot,
                 quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                # fingertips
+                # self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
+                # self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
+                # self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6), 
+                self.fingertip_force_binary_results,   # 10
                 # actions
                 self.actions,
             ),
@@ -447,6 +398,10 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
     def _visualize_debug_frames(self):
         """显示手 root、object、goal 的坐标系。"""
+        if not getattr(self.cfg, "debug_visualization", False):
+            return
+        if not hasattr(self, "frame_markers"):
+            return
 
         # hand root frame
         hand_pos_w = self.hand.data.root_pos_w
