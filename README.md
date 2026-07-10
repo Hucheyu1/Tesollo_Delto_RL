@@ -59,9 +59,6 @@ Tesollo_Delto_RL/
 │   ├── rsl_rl/
 │   │   ├── train.py
 │   │   └── play.py
-│   ├── yolo/
-│   │   ├── export_yolo_dataset.py
-│   │   └── train_yolo.py
 │   └── rl_games/
 │       ├── train.py
 │       └── play.py
@@ -72,6 +69,8 @@ Tesollo_Delto_RL/
         ├── tesollo_delto_rl_env.py
         ├── tesollo_delto_rl_env_cfg.py
         ├── tesollo_delto_rl_vision_env.py
+        ├── yolo_seg_image_estimator.py
+        ├── foundationpose_estimator.py
         ├── feature_extractor.py
         ├── agents/
         └── robots/
@@ -85,7 +84,8 @@ Tesollo_Delto_RL/
 | `tesollo_delto_rl_env.py` | Direct RL 环境逻辑，包括 reset、action、reward、observation。 |
 | `tesollo_delto_rl_env_cfg.py` | 主环境配置、物体配置、随机化事件、奖励参数、观测维度。 |
 | `tesollo_delto_rl_vision_env.py` | 带相机和 CNN feature extractor 的视觉版本环境。 |
-| `yolo_pose_estimator.py` | YOLO + RGB-D 的物体位置估计工具，用于仿真到真机迁移实验。 |
+| `yolo_seg_image_estimator.py` | 批量 YOLO-seg 二维中心、主轴角度与遮挡时序跟踪，用于蒸馏 student observation。 |
+| `foundationpose_estimator.py` | FoundationPose + RGB-D + mask 的物体 6D 位姿估计封装，用于仿真到真机迁移实验。 |
 | `agents/rsl_rl_ppo_cfg.py` | RSL-RL PPO、distillation runner、policy 和算法参数。 |
 | `agents/rl_games_ppo_cfg.yaml` | RL-Games PPO 配置。 |
 | `robots/dg5f_right.usd` | DG5F 右手机器人主 USD。 |
@@ -133,10 +133,12 @@ python scripts/rsl_rl/train.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 20
 使用 RSL-RL 蒸馏训练：
 
 ```bash
-python scripts/rsl_rl/train.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num_envs 2048 --headless --load_run 2026-06-25_15-36-45 --checkpoint model_9999.pt
+python scripts/rsl_rl/train.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num_envs 16 --headless --load_run 2026-06-25_15-36-45 --checkpoint model_9999.pt
 ```
 
-蒸馏任务使用 `TesolloDeltoRlEnvCfg` 的动力学、reset 和奖励参数；环境返回 `policy` 作为 student reduced observation，返回 `critic` 作为 teacher full observation。teacher checkpoint 应来自 `Tesollo-Delto-DG5F-Direct-v0` 的普通 RSL-RL 训练，例如 `logs/rsl_rl/TesolloDelto/<TEACHER_RUN>/model_*.pt`。如果不传 `--load_run` 和 `--checkpoint`，脚本会从 `logs/rsl_rl/TesolloDelto/` 下按名字选择最新匹配的 checkpoint。
+蒸馏任务使用 `TesolloDeltoRlEnvCfg` 的动力学、reset 和奖励参数。student 的 54 维 `policy` observation 为：关节位置 20 维、YOLO mask 归一化图像中心 2 维、绕手部局部 Y 轴的目标角误差 `[sin(2Δθ), cos(2Δθ)]` 2 维、二值触觉 10 维、上一时刻动作 20 维。二维位置以图像中心为 `(0, 0)`，范围约为 `[-1, 1]`，正 X 向右、正 Y 向下。
+
+环境返回与现有 teacher checkpoint 匹配的 84 维 `critic` 真值状态（不含新增的 10 维触觉），奖励和终止条件也仍使用仿真真值。双角形式是因为分割 mask 的 PCA 主轴具有 180° 等价性；`Δθ` 与 `Δθ+π` 会映射到相同特征。Distill 的旋转奖励、成功判定和 teacher 目标也统一为绕 Y 轴、模 180° 的最近等价姿态，避免同一 student observation 对应互相冲突的 teacher 动作。仿真仅在首次有效测量时估计一次共享的相机角度偏置，后续 reset 不再使用姿态真值；真机使用时应将标定结果填入 `yolo_angle_offset_rad`。teacher checkpoint 应来自 `Tesollo-Delto-DG5F-Direct-v0` 的 84 维普通 RSL-RL 训练，例如 `logs/rsl_rl/TesolloDelto/<TEACHER_RUN>/model_*.pt`。如果不传 `--load_run` 和 `--checkpoint`，脚本会从 `logs/rsl_rl/TesolloDelto/` 下按名字选择最新匹配的 checkpoint。视觉蒸馏包含相机渲染和 YOLO 推理，建议先从 16 个环境开始，再按显存和吞吐量调整 `--num_envs`；训练和播放脚本会为 Distill 任务自动启用相机。
 
 使用 RSL-RL 播放 checkpoint：
 
@@ -152,160 +154,108 @@ python scripts/rl_games/train.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 
 
 蒸馏、OpenAI 风格观测或视觉任务可将 `--task` 替换为上表中的对应任务名。
 
-## YOLO 视觉流程
+## FoundationPose 视觉流程
 
-YOLO 流程用于把仿真中的视觉感知方式迁移到真机。本项目现在支持两种路径：
+当前视觉迁移路线改为 FoundationPose：不再导出检测数据集，也不训练检测网络。FoundationPose 直接使用 `RGB + depth + mask + 相机内参 + 物体 mesh` 输出物体 6D 位姿。
 
-- 快速位置估计：YOLO detection/segmentation + RGB-D depth，输出物体 3D 中心位置。
-- 完整姿态估计：YOLO pose 关键点 + 3D 关键点模板 + OpenCV PnP，输出物体位置和四元数姿态。
+需要准备的输入：
 
-安装可选依赖：
+- RGB-D 图像：仿真中由 `Tesollo-Delto-DG5F-Vision-Direct-v0` 的 `TiledCamera` 输出，真机上来自 RGB-D 相机。
+- 目标 mask：仿真中由 semantic segmentation 生成，真机上可以来自任意分割模块或人工/规则分割。
+- 相机内参和外参：仿真中从 `camera.data.intrinsic_matrices`、`camera.data.pos_w`、`camera.data.quat_w_ros` 读取；真机上来自相机标定和手眼标定。
+- 目标 mesh：FoundationPose 通常需要 `.obj`、`.ply` 或 `.stl`。当前仿真物体是 `robots/tomato.usd`，实际使用前建议导出一个同尺度的 tomato mesh，例如 `assets/tomato.obj`。
+
+安装 FoundationPose 后设置路径：
 
 ```bash
 source /root/isaac_ws/IsaacLab/env_isaaclab/bin/activate
-uv pip install ultralytics opencv-python
+export FOUNDATIONPOSE_ROOT=/root/gpufree-data/FoundationPose
+export PYTHONPATH=$FOUNDATIONPOSE_ROOT:$PYTHONPATH
 ```
 
-### 位置估计
+FoundationPose 依赖和编译方式以 NVLabs FoundationPose 官方仓库为准。项目内的 `foundationpose_estimator.py` 只做接口封装，不把 FoundationPose 源码复制进来。
 
-从仿真导出 detection 数据集：
+### 仿真中使用
 
-```bash
-python scripts/yolo/export_yolo_dataset.py \
-  --task Tesollo-Delto-DG5F-Vision-Direct-v0 \
-  --num_envs 32 \
-  --num_images 5000 \
-  --label_type detect \
-  --output_dir datasets/tesollo_tomato_yolo \
-  --headless
-```
-
-导出目录结构：
-
-```text
-datasets/tesollo_tomato_yolo/
-├── dataset.yaml
-├── images/train
-├── images/val
-├── labels/train
-└── labels/val
-```
-
-训练 YOLO：
-
-```bash
-python scripts/yolo/train_yolo.py \
-  --data datasets/tesollo_tomato_yolo/dataset.yaml \
-  --task_type detect \
-  --epochs 100 \
-  --imgsz 320 \
-  --batch 32 \
-  --device 0
-```
-
-训练完成后，默认权重路径为：
-
-```text
-runs/tesollo_yolo/tomato_detect/weights/best.pt
-```
-
-在仿真中使用 YOLO + depth 估计物体位置：
+视觉环境的相机已经配置为输出 `rgb`、`depth` 和非彩色 `semantic_segmentation`，并用 `semantic_filter="class:tomato"` 尽量只保留目标物体 mask。
 
 ```python
-from .yolo_pose_estimator import YoloPoseEstimator, YoloPoseEstimatorCfg
+from .foundationpose_estimator import (
+    FoundationPoseEstimator,
+    FoundationPoseEstimatorCfg,
+    fixed_axis_twist_angle,
+    mask_from_semantic,
+)
 
-self.yolo_pose = YoloPoseEstimator(
-    YoloPoseEstimatorCfg(
-        model_path="runs/tesollo_yolo/tomato_detect/weights/best.pt",
-        class_id=0,
-        confidence_threshold=0.35,
-        device=self.device,
+self.pose_estimator = FoundationPoseEstimator(
+    FoundationPoseEstimatorCfg(
+        foundationpose_root="/root/gpufree-data/FoundationPose",
+        mesh_path="<PATH_TO_TOMATO_MESH_OBJ_OR_PLY>",
+        device="cuda:0",
     )
 )
 
-estimate = self.yolo_pose.estimate_from_tiled_camera(
+mask = mask_from_semantic(self._tiled_camera.data, semantic_label="tomato", foreground_fallback=True)
+estimate = self.pose_estimator.estimate_from_tiled_camera(
     self._tiled_camera.data,
+    mask=mask,
     env_origins=self.scene.env_origins,
 )
 
-object_pos_from_yolo = estimate.position_env
+object_pos = estimate.position_env
+object_quat = estimate.quat_w
+# 以手/初始姿态为参考，提取手局部 Y 轴的有符号 twist angle。
+angle_y_deg = fixed_axis_twist_angle(
+    estimate.quat_w,
+    axis=(0.0, 1.0, 0.0),
+    reference_quat_w=hand_or_initial_quat_w,
+)
 valid = estimate.valid
 ```
 
-### 完整姿态估计
+`quat_w` 使用 Isaac Lab 的 `(w, x, y, z)` 顺序。`estimate.pose_w` 是世界坐标系下的 4x4 齐次变换矩阵，`estimate.pose_camera` 是相机坐标系下的 4x4 变换矩阵。
 
-完整姿态估计需要 YOLO-pose 模型。导出脚本会把仿真物体的 3D 包围盒 8 个角点投影成关键点标签，角点顺序和 `YoloPoseEstimatorCfg(object_size=...)` 内部模板一致。
+### 真机迁移
 
-导出 pose 数据集：
-
-```bash
-python scripts/yolo/export_yolo_dataset.py \
-  --task Tesollo-Delto-DG5F-Vision-Direct-v0 \
-  --num_envs 32 \
-  --num_images 8000 \
-  --label_type pose \
-  --object_size 0.06 0.06 0.06 \
-  --output_dir datasets/tesollo_tomato_yolo_pose \
-  --headless
-```
-
-训练 YOLO-pose：
-
-```bash
-python scripts/yolo/train_yolo.py \
-  --data datasets/tesollo_tomato_yolo_pose/dataset.yaml \
-  --task_type pose \
-  --epochs 150 \
-  --imgsz 320 \
-  --batch 32 \
-  --device 0
-```
-
-默认权重路径：
-
-```text
-runs/tesollo_yolo/tomato_pose/weights/best.pt
-```
-
-使用完整姿态估计：
+真机侧也调用同一个估计器，只需要把仿真相机数据替换成真实 RGB-D、真实 mask、相机内参 `K` 和手眼标定后的相机位姿：
 
 ```python
-from .yolo_pose_estimator import YoloPoseEstimator, YoloPoseEstimatorCfg
-
-self.yolo_pose = YoloPoseEstimator(
-    YoloPoseEstimatorCfg(
-        model_path="runs/tesollo_yolo/tomato_pose/weights/best.pt",
-        class_id=0,
-        confidence_threshold=0.35,
-        object_size=(0.06, 0.06, 0.06),
-        min_keypoints_for_pnp=6,
-        device=self.device,
-    )
-)
-
-estimate = self.yolo_pose.estimate_from_tiled_camera(
-    self._tiled_camera.data,
-    env_origins=self.scene.env_origins,
-)
-
-object_pos_from_yolo = estimate.position_env
-object_quat_from_yolo = estimate.quat_w
-valid = estimate.valid
-```
-
-`quat_w` 使用 Isaac Lab 的 `(w, x, y, z)` 四元数顺序。对于西红柿这种接近球形的物体，外观本身可能没有唯一可观测朝向；代码可以输出完整姿态，但训练效果取决于模型是否能稳定识别出这些仿真关键点。如果实际物体没有明显纹理或几何特征，位置估计通常比姿态更可靠。
-
-真机使用同一个估计器，但需要传入真实 RGB-D 图像、相机内参和手眼标定得到的相机外参：
-
-```python
-estimate = yolo_pose.estimate(
+estimate = pose_estimator.estimate(
     rgb=rgb_tensor,
     depth=depth_tensor,
+    mask=mask_tensor,
     intrinsics=K_tensor,
     camera_pos_w=camera_pos_w,
     camera_quat_w=camera_quat_w,
 )
 ```
+
+如果相机固定在手外，`camera_pos_w/camera_quat_w` 来自外参标定；如果相机装在手上，则每步需要用机器人当前末端位姿更新相机世界位姿。FoundationPose 对 mask、深度尺度和 mesh 尺寸非常敏感，仿真和真机应尽量保持同一物体尺度、同一相机内参约定和同一坐标系约定。
+
+### YOLO mask 角度的遮挡鲁棒基线
+
+如果暂时没有可用的 FoundationPose mesh/RGB-D 标定，可以继续使用已有 YOLO segmentation，但不再直接把单帧 PCA 当成最终角度。`scripts/yolo_seg_sim/angle_estimator.py` 会根据 mask 面积、PCA 各向异性、轮廓 solidity 和检测置信度拒绝低质量测量，并在遮挡期间用带速度衰减的模 180°时序预测。
+
+交互查看：
+
+```bash
+python scripts/yolo_seg_sim/detect_seg_cal_angel_from_jpg.py \
+  --images datasets/test_picture \
+  --model scripts/yolo_seg_sim/best.pt
+```
+
+无界面批处理并输出质量报告：
+
+```bash
+python scripts/yolo_seg_sim/detect_seg_cal_angel_from_jpg.py \
+  --images datasets/test_picture \
+  --model scripts/yolo_seg_sim/best.pt \
+  --no-show \
+  --csv outputs/tomato_angles.csv \
+  --output-dir outputs/tomato_angle_frames
+```
+
+当前画面中未遮挡 mask 面积约为 `18000` 像素时，可以显式传入 `--reference-area 18000`，使序列第一帧恰好被遮挡时仍能判断可见比例。黄色轴是原始 PCA 测量，绿色轴是接受测量后的滤波结果，红色轴表示当前测量被拒绝、正在使用时序预测。该基线只能减少中短时遮挡误差；近圆、无纹理物体在完全遮挡下仍需要 RGB-D 位姿跟踪、额外标记或第二视角。
 
 ## 日志与输出
 
@@ -340,9 +290,7 @@ python -m py_compile \
   source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/agents/rsl_rl_ppo_cfg.py \
   source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/tesollo_delto_rl_env_cfg.py \
   source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/tesollo_delto_rl_vision_env.py \
-  source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/yolo_pose_estimator.py \
-  scripts/yolo/export_yolo_dataset.py \
-  scripts/yolo/train_yolo.py \
+  source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/foundationpose_estimator.py \
   scripts/list_envs.py
 ```
 

@@ -68,6 +68,7 @@ _build
 
 # Tests
 tests/
+yolo/
 
 # Docker history
 .isaac-lab-docker-history

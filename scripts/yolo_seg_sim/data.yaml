@@ -1,0 +1,8 @@
+path: ./datasets_seg_tomato_real_and_sim
+train: train/images
+val: val/images
+test:  # 可选测试集路径
+
+# 类别定义（替换为你的实际类别）
+names: ['tomato']
+nc: 1  # 类别总数（单物体固定为1）

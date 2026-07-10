@@ -13,8 +13,11 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, FRAME_MARKER_CFG
+from isaaclab.sensors import TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
+
+from .yolo_seg_image_estimator import axial_angle_error_features
 
 if TYPE_CHECKING:
     from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
@@ -126,9 +129,40 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         for action_id, joint_id in enumerate(self.actuated_dof_indices):
             print(f"action[{action_id:02d}] -> joint_id={joint_id:02d}, name={self.hand.joint_names[joint_id]}")
 
+        # YOLO is only initialized for the distillation student. The teacher,
+        # rewards and termination logic continue to use simulator ground truth.
+        self.yolo_student_estimator = None
+        if getattr(self.cfg, "use_yolo_student_obs", False):
+            from .yolo_seg_image_estimator import YoloSegImageEstimator
+
+            self.yolo_student_estimator = YoloSegImageEstimator(
+                model_path=self.cfg.yolo_model_path,
+                num_envs=self.num_envs,
+                device=self.device,
+                class_id=self.cfg.yolo_class_id,
+                confidence_threshold=self.cfg.yolo_confidence_threshold,
+                iou_threshold=self.cfg.yolo_iou_threshold,
+                inference_size=self.cfg.yolo_inference_size,
+                min_mask_pixels=self.cfg.yolo_min_mask_pixels,
+                position_gain=self.cfg.yolo_position_gain,
+                min_anisotropy=self.cfg.yolo_min_anisotropy,
+                min_visible_ratio=self.cfg.yolo_min_visible_ratio,
+                max_angle_jump_rad=self.cfg.yolo_max_angle_jump,
+            )
+            configured_offset = getattr(self.cfg, "yolo_angle_offset_rad", None)
+            initial_offset = 0.0 if configured_offset is None else float(configured_offset)
+            self.yolo_angle_offset = torch.full(
+                (self.num_envs,), initial_offset, dtype=torch.float32, device=self.device
+            )
+            self.yolo_angle_calibrated = torch.full(
+                (self.num_envs,), configured_offset is not None, dtype=torch.bool, device=self.device
+            )
+
     def _setup_scene(self):
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
+        if getattr(self.cfg, "use_yolo_student_obs", False):
+            self._student_camera = TiledCamera(self.cfg.student_camera)
 
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
@@ -136,6 +170,8 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
+        if getattr(self.cfg, "use_yolo_student_obs", False):
+            self.scene.sensors["student_camera"] = self._student_camera
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -216,6 +252,8 @@ class TesolloDeltoRlEnv(DirectRLEnv):
             self.cfg.fall_dist,                     # 坠落距离
             self.cfg.fall_penalty,                  # 坠落惩罚
             self.cfg.av_factor,                     # 平均值因子
+            bool(getattr(self.cfg, "y_axis_only", False)),
+            self.hand_base_rot,
         )
         # 初始化extras中的log字典
         if "log" not in self.extras:
@@ -237,7 +275,10 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # 如果配置了最大连续成功次数，则需要检查旋转距离
         if self.cfg.max_consecutive_success > 0:
             # 计算物体旋转与目标旋转之间的距离
-            rot_dist = rotation_distance(self.object_rot, self.goal_rot)
+            if getattr(self.cfg, "y_axis_only", False):
+                rot_dist = axial_y_rotation_distance(self.object_rot, self.goal_rot, self.hand_base_rot)
+            else:
+                rot_dist = rotation_distance(self.object_rot, self.goal_rot)
             # 如果旋转距离在容差范围内，则重置episode长度缓冲区
             self.episode_length_buf = torch.where(
                 torch.abs(rot_dist) <= self.cfg.success_tolerance,
@@ -256,6 +297,16 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
     def _reset_target_pose(self, env_ids):
         # 目标旋转在手部-根部局部坐标系中
+        if getattr(self.cfg, "y_axis_only", False):
+            rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 1), device=self.device)
+            goal_rot_local = quat_from_angle_axis(
+                rand_floats[:, 0] * np.pi,
+                self.y_unit_tensor[env_ids],
+            )
+            self.goal_rot[env_ids] = quat_mul(self.hand_base_rot[env_ids], goal_rot_local)
+            self._update_goal_marker(env_ids)
+            return
+
         # 生成均匀分布的随机数用于随机化旋转
         rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
 
@@ -274,9 +325,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
             goal_rot_local,
         )
 
-        # 目标标记跟随物体的默认局部位置
-        # 通过四元数应用将局部位置转换到世界坐标系
-        # ---------------------------------------------------------------------
+        self._update_goal_marker(env_ids)
+
+    def _update_goal_marker(self, env_ids):
+        """Update goal marker position after assigning ``self.goal_rot``."""
+
         goal_marker_offset = torch.tensor(
             self.cfg.goal_marker_offset,
             dtype=torch.float,
@@ -287,6 +340,10 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.goal_pos[env_ids] = self.hand_base_pos[env_ids] + goal_marker_offset
 
         goal_pos_w = self.goal_pos + self.scene.env_origins
+        if getattr(self.cfg, "use_yolo_student_obs", False):
+            # The marker uses the same tomato mesh and could be selected by
+            # YOLO as a second object. Keep it out of all student cameras.
+            goal_pos_w = torch.full_like(goal_pos_w, -10.0)
         self.goal_markers.visualize(goal_pos_w, self.goal_rot)
 
         # 重置目标缓冲区，表示目标已重置
@@ -329,18 +386,87 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self._visualize_debug_frames()
 
     def compute_reduced_observations(self):
+        if self.cfg.obs_type == "distill" and getattr(self.cfg, "use_yolo_student_obs", False):
+            object_position_obs, target_angle_features = self._compute_yolo_student_object_observations()
+            obs = torch.cat(
+                (
+                    unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
+                    object_position_obs,
+                    target_angle_features,
+                    self.fingertip_force_binary_results,
+                    self.actions,
+                ),
+                dim=-1,
+            )
+            return obs
+
         obs = torch.cat(
             (
                 unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
                 self.object_pos,
-                # quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                self.goal_rot,
-                self.fingertip_force_binary_results, # 10
+                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+                # self.goal_rot,
+                self.fingertip_force_binary_results,  # 10
                 self.actions,
             ),
             dim=-1,
         )
         return obs
+
+    @torch.no_grad()
+    def _compute_yolo_student_object_observations(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return normalized YOLO 2-D center and axial-angle error features."""
+
+        if self.yolo_student_estimator is None:
+            raise RuntimeError("YOLO student observations are enabled but the estimator is not initialized.")
+
+        estimate = self.yolo_student_estimator.estimate(self._student_camera.data)
+
+        object_y_angle = y_axis_twist_angle(self.object_rot, self.hand_base_rot)
+        goal_y_angle = y_axis_twist_angle(self.goal_rot, self.hand_base_rot)
+        angle_sign = float(self.cfg.yolo_angle_sign)
+
+        if not self.yolo_angle_calibrated.any() and estimate.measurement_valid.any():
+            # The camera convention is shared by all cloned environments, so
+            # estimate one robust modulo-pi offset and retain it across resets.
+            # For real deployment, set yolo_angle_offset_rad in the config and
+            # this simulator-ground-truth calibration path is never used.
+            candidates = torch.remainder(
+                estimate.angle_image_rad[estimate.measurement_valid]
+                - angle_sign * object_y_angle[estimate.measurement_valid],
+                torch.pi,
+            )
+            shared_offset = 0.5 * torch.atan2(
+                torch.sin(2.0 * candidates).mean(),
+                torch.cos(2.0 * candidates).mean(),
+            )
+            shared_offset = torch.remainder(shared_offset, torch.pi)
+            self.yolo_angle_offset[:] = shared_offset
+            self.yolo_angle_calibrated[:] = True
+
+        observed_object_y = angle_sign * torch.remainder(
+            estimate.angle_image_rad - self.yolo_angle_offset,
+            torch.pi,
+        )
+        # The PCA axis is modulo pi, so use double-angle features. This maps
+        # equivalent errors theta and theta+pi to the same continuous vector.
+        angle_features = axial_angle_error_features(observed_object_y, goal_y_angle)
+        uncalibrated_features = torch.zeros_like(angle_features)
+        uncalibrated_features[:, 1] = 1.0  # sin(0), cos(0)
+        angle_features = torch.where(
+            self.yolo_angle_calibrated.unsqueeze(-1),
+            angle_features,
+            uncalibrated_features,
+        )
+
+        if "log" not in self.extras:
+            self.extras["log"] = dict()
+        self.extras["log"]["yolo_position_valid"] = estimate.position_valid.float().mean()
+        self.extras["log"]["yolo_angle_measurement_valid"] = estimate.measurement_valid.float().mean()
+        self.extras["log"]["yolo_visible_ratio"] = estimate.visible_ratio.mean()
+        self.extras["log"]["yolo_angle_offset_rad"] = self.yolo_angle_offset.mean()
+
+        return estimate.position_image, angle_features
 
     def compute_full_observations(self):
         obs = torch.cat(
@@ -370,30 +496,42 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         return obs
 
     def compute_full_state(self):
-        states = torch.cat(
-            (
-                # hand
-                unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                self.cfg.vel_obs_scale * self.hand_dof_vel,
-                # object
-                self.object_pos,
+        teacher_goal_rot = self.goal_rot
+        if self.cfg.obs_type == "distill" and getattr(self.cfg, "y_axis_only", False):
+            # PCA-based student observations cannot distinguish theta from
+            # theta+pi. Present the teacher with the nearest equivalent goal
+            # so its action target follows the same axial-angle semantics.
+            teacher_goal_rot = nearest_axial_y_goal_rotation(
                 self.object_rot,
-                self.object_linvel,
-                self.cfg.vel_obs_scale * self.object_angvel,
-                # goal
-                self.in_hand_pos,
                 self.goal_rot,
-                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                # fingertips
-                # self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                # self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                # self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6), 
-                self.fingertip_force_binary_results,   # 10
-                # actions
-                self.actions,
-            ),
-            dim=-1,
-        )
+                self.hand_base_rot,
+                self.y_unit_tensor,
+            )
+
+        state_parts = [
+            # hand
+            unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
+            self.cfg.vel_obs_scale * self.hand_dof_vel,
+            # object
+            self.object_pos,
+            self.object_rot,
+            self.object_linvel,
+            self.cfg.vel_obs_scale * self.object_angvel,
+            # goal
+            self.in_hand_pos,
+            teacher_goal_rot,
+            quat_mul(self.object_rot, quat_conjugate(teacher_goal_rot)),
+        ]
+        # The existing teacher checkpoint was trained with the original
+        # 84-dimensional state, before 10 tactile values were added. Keep that
+        # exact layout for distillation; other asymmetric tasks retain tactile.
+        if not (
+            self.cfg.obs_type == "distill"
+            and not getattr(self.cfg, "distill_teacher_include_tactile", False)
+        ):
+            state_parts.append(self.fingertip_force_binary_results)
+        state_parts.append(self.actions)
+        states = torch.cat(state_parts, dim=-1)
         return states
 
     def _visualize_debug_frames(self):
@@ -461,14 +599,22 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # ---------------------------------------------------------------------
         object_root_state = self.object.data.default_root_state[env_ids].clone()
         object_root_state[:, :3] += self.scene.env_origins[env_ids]
-        # 如果你想完全固定初始姿态，就保持默认 rot，不随机
-        rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
-        object_root_state[:, 3:7] = randomize_rotation(
-            rot_noise[:, 0] * 20.0 / 180.0,
-            rot_noise[:, 1] * 20.0 / 180.0,
-            self.x_unit_tensor[env_ids],
-            self.y_unit_tensor[env_ids],
-        )
+        if getattr(self.cfg, "y_axis_only", False):
+            rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 1), device=self.device)
+            y_noise = quat_from_angle_axis(
+                rot_noise[:, 0] * 20.0 / 180.0 * np.pi,
+                self.y_unit_tensor[env_ids],
+            )
+            object_root_state[:, 3:7] = quat_mul(object_root_state[:, 3:7], y_noise)
+        else:
+            # 如果你想完全固定初始姿态，就保持默认 rot，不随机
+            rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+            object_root_state[:, 3:7] = randomize_rotation(
+                rot_noise[:, 0] * 20.0 / 180.0,
+                rot_noise[:, 1] * 20.0 / 180.0,
+                self.x_unit_tensor[env_ids],
+                self.y_unit_tensor[env_ids],
+            )
         object_root_state[:, 7:] = 0.0
 
         self.object.write_root_pose_to_sim(object_root_state[:, :7], env_ids)
@@ -523,6 +669,9 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
         self._compute_intermediate_values()
 
+        if getattr(self, "yolo_student_estimator", None) is not None:
+            self.yolo_student_estimator.reset(env_ids)
+
 @torch.jit.script
 def scale(x, lower, upper):
     return 0.5 * (x + 1.0) * (upper - lower) + lower
@@ -539,6 +688,54 @@ def randomize_rotation(rand0, rand1, x_unit_tensor, y_unit_tensor):
         quat_from_angle_axis(rand0 * np.pi, x_unit_tensor),
         quat_from_angle_axis(rand1 * np.pi, y_unit_tensor),
     )
+
+
+@torch.jit.script
+def y_axis_twist_angle(current_rot: torch.Tensor, reference_rot: torch.Tensor) -> torch.Tensor:
+    """Return signed Y-axis swing-twist angle in ``[-pi, pi)``."""
+
+    relative = quat_mul(quat_conjugate(reference_rot), current_rot)
+    twist_norm = torch.sqrt(relative[:, 0] ** 2 + relative[:, 2] ** 2).clamp_min(1e-8)
+    twist_w = relative[:, 0] / twist_norm
+    twist_y = relative[:, 2] / twist_norm
+    angle = 2.0 * torch.atan2(twist_y, twist_w)
+    return torch.remainder(angle + np.pi, 2.0 * np.pi) - np.pi
+
+
+@torch.jit.script
+def axial_y_rotation_distance(
+    object_rot: torch.Tensor,
+    target_rot: torch.Tensor,
+    reference_rot: torch.Tensor,
+) -> torch.Tensor:
+    """Absolute Y-axis angle error with a directionless period of pi."""
+
+    object_angle = y_axis_twist_angle(object_rot, reference_rot)
+    target_angle = y_axis_twist_angle(target_rot, reference_rot)
+    half_period = np.pi / 2.0
+    error = torch.remainder(object_angle - target_angle + half_period, np.pi) - half_period
+    return torch.abs(error)
+
+
+@torch.jit.script
+def nearest_axial_y_goal_rotation(
+    object_rot: torch.Tensor,
+    target_rot: torch.Tensor,
+    reference_rot: torch.Tensor,
+    y_axis: torch.Tensor,
+) -> torch.Tensor:
+    """Return the target or its pi-equivalent nearest to the object angle."""
+
+    object_angle = y_axis_twist_angle(object_rot, reference_rot)
+    target_angle = y_axis_twist_angle(target_rot, reference_rot)
+    half_period = np.pi / 2.0
+    object_minus_target = torch.remainder(
+        object_angle - target_angle + half_period,
+        np.pi,
+    ) - half_period
+    nearest_target_angle = object_angle - object_minus_target
+    target_local = quat_from_angle_axis(nearest_target_angle, y_axis)
+    return quat_mul(reference_rot, target_local)
 
 
 @torch.jit.script
@@ -570,10 +767,15 @@ def compute_rewards(
     fall_dist: float,
     fall_penalty: float,
     av_factor: float,
+    y_axis_only: bool,
+    rotation_reference: torch.Tensor,
 ):
     # 计算物体到目标的距离和旋转差异
     goal_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
-    rot_dist = rotation_distance(object_rot, target_rot)
+    if y_axis_only:
+        rot_dist = axial_y_rotation_distance(object_rot, target_rot, rotation_reference)
+    else:
+        rot_dist = rotation_distance(object_rot, target_rot)
     # 计算距离奖励和旋转奖励
     dist_rew = goal_dist * dist_reward_scale
     rot_rew = 1.0 / (torch.abs(rot_dist) + rot_eps) * rot_reward_scale

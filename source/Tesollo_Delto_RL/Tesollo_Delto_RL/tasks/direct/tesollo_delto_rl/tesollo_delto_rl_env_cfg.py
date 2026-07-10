@@ -9,6 +9,7 @@ from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.markers import VisualizationMarkersCfg
 from isaaclab.scene import InteractiveSceneCfg
+from isaaclab.sensors import TiledCameraCfg
 from isaaclab.sim import PhysxCfg, SimulationCfg
 from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
@@ -136,7 +137,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     # robot
     robot_cfg: ArticulationCfg = TESOLLO_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    fingertip_body_names = [ "rl_dg_1_3","rl_dg_1_4","rl_dg_2_2","rl_dg_2_3","rl_dg_3_2"
+    fingertip_body_names = ["rl_dg_1_3","rl_dg_1_4","rl_dg_2_2","rl_dg_2_3","rl_dg_3_2",
                             "rl_dg_3_3","rl_dg_4_2","rl_dg_4_3","rl_dg_5_3","rl_dg_5_4"]
 
     # 20 个可控关节，顺序建议和实机动作顺序保持一致
@@ -276,10 +277,66 @@ class TesolloDeltoRlDistillEnvCfg(TesolloDeltoRlEnvCfg):
     读取 full observation。
     """
 
-    observation_space = 47 + 10
-    state_space = 84 + 10
+    # student: joints(20) + normalized YOLO image center(2)
+    #          + axial target error [sin(2e), cos(2e)](2)
+    #          + tactile(10) + previous action(20) = 54
+    observation_space = 54
+    # Existing teacher checkpoint input: full simulator state without tactile.
+    state_space = 84
     asymmetric_obs = True
     obs_type = "distill"
+    distill_teacher_include_tactile = False
+
+    # The visual student is considerably more expensive than the state-only
+    # environment. Override with --num_envs after measuring GPU headroom.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=16,
+        env_spacing=2.0,
+        replicate_physics=True,
+    )
+
+    use_yolo_student_obs = True
+    y_axis_only = True
+
+    # Match the camera used to collect datasets/test_picture and train best.pt.
+    # RGB-only TiledCamera keeps batched visual inference practical.
+    student_camera: TiledCameraCfg = TiledCameraCfg(
+        prim_path="/World/envs/env_.*/StudentCamera",
+        offset=TiledCameraCfg.OffsetCfg(
+            pos=(0.11, 0.25, 0.37),
+            rot=(0.707106, 0.0, 0.0, -0.707106),
+            convention="world",
+        ),
+        data_types=["rgb"],
+        spawn=sim_utils.PinholeCameraCfg(
+            focal_length=18.0,
+            focus_distance=0.45,
+            horizontal_aperture=20.955,
+            clipping_range=(0.01, 1.5),
+        ),
+        width=640,
+        height=480,
+        update_latest_camera_pose=True,
+        debug_vis=False,
+    )
+
+    yolo_model_path = "/root/gpufree-data/Tesollo_Delto_RL/scripts/yolo_seg_sim/best.pt"
+    yolo_class_id = 0
+    yolo_confidence_threshold = 0.5
+    yolo_iou_threshold = 0.7
+    yolo_inference_size = 640
+    yolo_min_mask_pixels = 64
+    yolo_position_gain = 0.65
+    yolo_min_anisotropy = 0.10
+    yolo_min_visible_ratio = 0.40
+    yolo_max_angle_jump = 0.70
+    # Set to -1.0 if image PCA angle changes opposite to positive hand-local Y.
+    yolo_angle_sign = 1.0
+    # Fixed camera-to-axis offset for deployment, in radians modulo pi. When
+    # None, simulation estimates it once from ground truth and keeps it fixed.
+    yolo_angle_offset_rad: float | None = None
+
+    debug_visualization = False
 
 @configclass
 class TesolloDeltoRlOpenAIEnvCfg(TesolloDeltoRlEnvCfg):

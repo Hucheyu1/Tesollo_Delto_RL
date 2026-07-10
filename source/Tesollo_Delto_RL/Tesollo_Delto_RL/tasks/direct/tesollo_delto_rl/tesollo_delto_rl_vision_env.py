@@ -26,7 +26,7 @@ class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
     scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=256, env_spacing=2.0, replicate_physics=True)
 
     # camera
-    # YOLO 数据采集需要目标在画面中足够大、且能看到手心中的物体。
+    # FoundationPose 需要稳定的 RGB-D 视角和目标 mask。
     # 这里将相机放在手前上方，使用 world convention: 相机局部 +X 朝向目标、+Z 尽量朝上。
     tiled_camera: TiledCameraCfg = TiledCameraCfg(
         prim_path="/World/envs/env_.*/Camera",
@@ -36,6 +36,8 @@ class TesolloDeltoRlVisionEnvCfg(TesolloDeltoRlEnvCfg):
             convention="world",
         ),
         data_types=["rgb", "depth", "semantic_segmentation"],
+        semantic_filter="class:tomato",
+        colorize_semantic_segmentation=False,
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=18.0,
             focus_distance=0.45,
@@ -76,7 +78,7 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
         # 关键点缓冲区
         self.gt_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
         self.goal_keypoints = torch.ones(self.num_envs, 8, 3, dtype=torch.float32, device=self.device)
-        # YOLO 数据集中只应该出现真实被抓物体；将 goal marker 隐藏到相机视野外，避免生成伪目标。
+        # 视觉估计只应该看到真实被抓物体；将 goal marker 隐藏到相机视野外，避免生成伪目标。
         self.hidden_goal_pos = torch.tensor((-10.0, -10.0, -10.0), dtype=torch.float32, device=self.device).repeat(
             self.num_envs, 1
         )
@@ -106,14 +108,18 @@ class TesolloDeltoRlVisionEnv(TesolloDeltoRlEnv):
 
         rgb = self._tiled_camera.data.output["rgb"]
 
-        # export_yolo_dataset.py 会关闭 CNN 训练/加载。此时环境只负责渲染图像和提供真值标签，
-        # 直接返回零 embedding，避免旧 CNN 的 120x120 固定输入限制影响 YOLO 数据采集。
+        # 视觉位姿估计流程会关闭 CNN 训练/加载。此时环境只负责渲染 RGB-D 和 mask，
+        # 直接返回零 embedding，避免旧 CNN 的 120x120 固定输入限制影响外部位姿估计。
         if not self.cfg.feature_extractor.train and not self.cfg.feature_extractor.load_checkpoint:
             pose_loss = torch.zeros((), dtype=torch.float32, device=self.device)
             self.embeddings.zero_()
         else:
             depth = self._tiled_camera.data.output["depth"]
-            semantic = self._tiled_camera.data.output["semantic_segmentation"][..., :3]
+            semantic = self._tiled_camera.data.output["semantic_segmentation"]
+            if semantic.shape[-1] == 1:
+                semantic = (semantic != 0).to(dtype=torch.float32).repeat(1, 1, 1, 3) * 255.0
+            else:
+                semantic = semantic[..., :3]
             # train CNN to regress on keypoint positions
             pose_loss, embeddings = self.feature_extractor.step(rgb, depth, semantic, object_pose)
             self.embeddings = embeddings.clone().detach()
