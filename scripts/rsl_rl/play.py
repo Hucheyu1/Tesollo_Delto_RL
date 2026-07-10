@@ -8,6 +8,7 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import math
 import sys
 
 from isaaclab.app import AppLauncher
@@ -34,6 +35,56 @@ parser.add_argument(
     help="Use the pre-trained checkpoint from Nucleus.",
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
+parser.add_argument(
+    "--video_view",
+    "--video-view",
+    choices=("camera", "viewer"),
+    default="camera",
+    help=(
+        "Viewpoint used by --video. 'camera' records from the configured student camera pose when available; "
+        "'viewer' keeps the task's default viewer pose."
+    ),
+)
+parser.add_argument(
+    "--hide_video_markers",
+    "--hide-video-markers",
+    action="store_true",
+    default=False,
+    help="Do not force goal/object coordinate-frame markers on while recording play video.",
+)
+parser.add_argument(
+    "--show_video_goal_mesh",
+    "--show-video-goal-mesh",
+    action="store_true",
+    default=False,
+    help=(
+        "Also show the target tomato mesh in play videos. For YOLO distillation policies this can change the "
+        "student observation, so the safer default is to show only coordinate-frame markers."
+    ),
+)
+parser.add_argument(
+    "--goal_y_angle_deg",
+    "--goal-y-angle-deg",
+    type=float,
+    default=None,
+    help="Fix the play target to a hand-local Y-axis angle in degrees. Useful for distillation tests.",
+)
+parser.add_argument(
+    "--goal_y_angle_rad",
+    "--goal-y-angle-rad",
+    type=float,
+    default=None,
+    help="Fix the play target to a hand-local Y-axis angle in radians. Takes precedence over degrees.",
+)
+parser.add_argument(
+    "--goal_rot",
+    "--goal-rot",
+    type=float,
+    nargs=4,
+    default=None,
+    metavar=("W", "X", "Y", "Z"),
+    help="Fix self.goal_rot directly as a world/env quaternion in w x y z order. Takes precedence over angle.",
+)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -95,6 +146,38 @@ from isaaclab_tasks.utils.hydra import hydra_task_config
 import Tesollo_Delto_RL.tasks  # noqa: F401
 
 
+def _as_tuple3(value) -> tuple[float, float, float]:
+    return tuple(float(x) for x in value)
+
+
+def _configure_video_camera_view(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    """Use the configured camera position as the viewport recording view."""
+
+    camera_cfg = getattr(env_cfg, "student_camera", None)
+    if camera_cfg is None:
+        camera_cfg = getattr(env_cfg, "tiled_camera", None)
+    if camera_cfg is None or not hasattr(camera_cfg, "offset"):
+        print("[INFO] --video_view camera requested, but this task has no student/tiled camera cfg. Keeping viewer pose.")
+        return
+
+    camera_pos = _as_tuple3(camera_cfg.offset.pos)
+    object_cfg = getattr(env_cfg, "object_cfg", None)
+    object_init_state = getattr(object_cfg, "init_state", None)
+    camera_lookat = _as_tuple3(getattr(object_init_state, "pos", (0.10, 0.0, 0.50)))
+
+    env_cfg.viewer.origin_type = "env"
+    env_cfg.viewer.env_index = 0
+    env_cfg.viewer.eye = camera_pos
+    env_cfg.viewer.lookat = camera_lookat
+    if hasattr(camera_cfg, "width") and hasattr(camera_cfg, "height"):
+        env_cfg.viewer.resolution = (int(camera_cfg.width), int(camera_cfg.height))
+
+    print(
+        "[INFO] Recording play video from configured camera view: "
+        f"eye={env_cfg.viewer.eye}, lookat={env_cfg.viewer.lookat}, resolution={env_cfg.viewer.resolution}"
+    )
+
+
 @hydra_task_config(args_cli.task, args_cli.agent)
 def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agent_cfg: RslRlBaseRunnerCfg):
     """Play with RSL-RL agent."""
@@ -105,6 +188,28 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.video:
+        if args_cli.video_view == "camera":
+            _configure_video_camera_view(env_cfg)
+        if not args_cli.hide_video_markers:
+            if hasattr(env_cfg, "debug_visualization"):
+                env_cfg.debug_visualization = True
+            print("[INFO] Play video frame markers enabled: tomato/object frame and goal frame.")
+        if args_cli.show_video_goal_mesh and hasattr(env_cfg, "hide_goal_marker_from_yolo"):
+            env_cfg.hide_goal_marker_from_yolo = False
+            print("[INFO] Play video goal tomato mesh marker enabled.")
+    if args_cli.goal_rot is not None:
+        env_cfg.fixed_goal_rot = tuple(args_cli.goal_rot)
+        print(f"[INFO] Fixed play goal quaternion wxyz: {env_cfg.fixed_goal_rot}")
+    elif args_cli.goal_y_angle_rad is not None:
+        env_cfg.fixed_goal_y_angle_rad = args_cli.goal_y_angle_rad
+        print(f"[INFO] Fixed play goal Y angle: {env_cfg.fixed_goal_y_angle_rad:.6f} rad")
+    elif args_cli.goal_y_angle_deg is not None:
+        env_cfg.fixed_goal_y_angle_rad = math.radians(args_cli.goal_y_angle_deg)
+        print(
+            f"[INFO] Fixed play goal Y angle: {args_cli.goal_y_angle_deg:.3f} deg "
+            f"({env_cfg.fixed_goal_y_angle_rad:.6f} rad)"
+        )
 
     # handle deprecated configurations
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)

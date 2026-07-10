@@ -234,6 +234,11 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
 
     # 手中目标配置：在物体初始局部位置基础上，沿手掌局部z方向稍微往内
     in_hand_local_offset = (-0.02, 0.0, -0.03)
+    # Optional fixed target for play/debug. ``fixed_goal_y_angle_rad`` is a
+    # hand-local Y-axis command; ``fixed_goal_rot`` is a raw world/env wxyz
+    # quaternion and takes precedence when set.
+    fixed_goal_y_angle_rad: float | None = None
+    fixed_goal_rot: tuple[float, float, float, float] | None = None
 
     # 奖励函数配置
     dist_reward_scale = -10.0  # 距离奖励缩放因子
@@ -260,6 +265,10 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         },
     )
     goal_marker_offset = (0.0, 0.0, 0.15)
+    # Distillation can hide the goal tomato marker from YOLO so it is not
+    # detected as a second object. Play video can turn this off to visualize
+    # the target pose in the camera view.
+    hide_goal_marker_from_yolo = False
     viewer = ViewerCfg(
         eye=(0.45, -0.65, 0.85),
         lookat=(0.10, 0.00, 0.50),
@@ -336,6 +345,7 @@ class TesolloDeltoRlDistillEnvCfg(TesolloDeltoRlEnvCfg):
     # None, simulation estimates it once from ground truth and keeps it fixed.
     yolo_angle_offset_rad: float | None = None
 
+    hide_goal_marker_from_yolo = True
     debug_visualization = False
 
 @configclass

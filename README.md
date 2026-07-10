@@ -136,7 +136,7 @@ python scripts/rsl_rl/train.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 20
 python scripts/rsl_rl/train.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num_envs 16 --headless --load_run 2026-06-25_15-36-45 --checkpoint model_9999.pt
 ```
 
-蒸馏任务使用 `TesolloDeltoRlEnvCfg` 的动力学、reset 和奖励参数。student 的 54 维 `policy` observation 为：关节位置 20 维、YOLO mask 归一化图像中心 2 维、绕手部局部 Y 轴的目标角误差 `[sin(2Δθ), cos(2Δθ)]` 2 维、二值触觉 10 维、上一时刻动作 20 维。二维位置以图像中心为 `(0, 0)`，范围约为 `[-1, 1]`，正 X 向右、正 Y 向下。
+蒸馏任务使用 `TesolloDeltoRlEnvCfg` 的动力学、reset 和奖励参数。student 的 54 维 `policy` observation 为：关节位置 20 维、YOLO mask 归一化图像中心 2 维、绕相机视角反方向（当前配置下等价于手部局部 Y 轴）的目标角误差 `[sin(2Δθ), cos(2Δθ)]` 2 维、二值触觉 10 维、上一时刻动作 20 维。二维位置以图像中心为 `(0, 0)`，范围约为 `[-1, 1]`，正 X 向右、正 Y 向下。
 
 环境返回与现有 teacher checkpoint 匹配的 84 维 `critic` 真值状态（不含新增的 10 维触觉），奖励和终止条件也仍使用仿真真值。双角形式是因为分割 mask 的 PCA 主轴具有 180° 等价性；`Δθ` 与 `Δθ+π` 会映射到相同特征。Distill 的旋转奖励、成功判定和 teacher 目标也统一为绕 Y 轴、模 180° 的最近等价姿态，避免同一 student observation 对应互相冲突的 teacher 动作。仿真仅在首次有效测量时估计一次共享的相机角度偏置，后续 reset 不再使用姿态真值；真机使用时应将标定结果填入 `yolo_angle_offset_rad`。teacher checkpoint 应来自 `Tesollo-Delto-DG5F-Direct-v0` 的 84 维普通 RSL-RL 训练，例如 `logs/rsl_rl/TesolloDelto/<TEACHER_RUN>/model_*.pt`。如果不传 `--load_run` 和 `--checkpoint`，脚本会从 `logs/rsl_rl/TesolloDelto/` 下按名字选择最新匹配的 checkpoint。视觉蒸馏包含相机渲染和 YOLO 推理，建议先从 16 个环境开始，再按显存和吞吐量调整 `--num_envs`；训练和播放脚本会为 Distill 任务自动启用相机。
 
@@ -144,6 +144,26 @@ python scripts/rsl_rl/train.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num
 
 ```bash
 python scripts/rsl_rl/play.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 16 --checkpoint <PATH_TO_CHECKPOINT>
+```
+
+播放时录制视频会默认使用配置中的 `student_camera`/`tiled_camera` 视角，并在画面中显示番茄物体坐标系和目标坐标系：
+
+```bash
+python scripts/rsl_rl/play.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT> --video --video_length 300
+```
+
+如果希望保留原来的 viewer 视角，可加 `--video_view viewer`。默认只显示坐标系，避免目标番茄 mesh 被 YOLO 当成第二个番茄；如果只是做可视化展示、希望视频里也显示目标番茄 mesh，可额外加 `--show_video_goal_mesh`。
+
+蒸馏任务播放时可以固定测试目标角度，例如让目标姿态为绕相机视角反方向（当前等价于手部局部 Y 轴）旋转 45°：
+
+```bash
+python scripts/rsl_rl/play.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT> --goal_y_angle_deg 45
+```
+
+如果需要直接指定 `self.goal_rot`，可以传 `w x y z` 顺序的四元数：
+
+```bash
+python scripts/rsl_rl/play.py --task Tesollo-Delto-DG5F-Distill-Direct-v0 --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT> --goal_rot 0.9238795 0.0 0.3826834 0.0
 ```
 
 使用 RL-Games 训练：

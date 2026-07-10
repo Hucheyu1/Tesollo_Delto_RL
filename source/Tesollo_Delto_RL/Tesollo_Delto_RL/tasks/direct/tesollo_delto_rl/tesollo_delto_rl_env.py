@@ -296,11 +296,30 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         return out_of_reach, time_out
 
     def _reset_target_pose(self, env_ids):
+        fixed_goal_rot = getattr(self.cfg, "fixed_goal_rot", None)
+        if fixed_goal_rot is not None:
+            goal_rot = torch.tensor(fixed_goal_rot, dtype=torch.float, device=self.device).view(1, 4)
+            goal_rot = goal_rot / torch.linalg.vector_norm(goal_rot, dim=-1, keepdim=True).clamp_min(1e-8)
+            self.goal_rot[env_ids] = goal_rot.repeat(len(env_ids), 1)
+            self._update_goal_marker(env_ids)
+            return
+
+        fixed_goal_y_angle = getattr(self.cfg, "fixed_goal_y_angle_rad", None)
+        if fixed_goal_y_angle is not None:
+            goal_angles = torch.full((len(env_ids),), float(fixed_goal_y_angle), dtype=torch.float, device=self.device)
+            goal_rot_local = quat_from_angle_axis(
+                goal_angles,
+                self.y_unit_tensor[env_ids],
+            )
+            self.goal_rot[env_ids] = quat_mul(self.hand_base_rot[env_ids], goal_rot_local)
+            self._update_goal_marker(env_ids)
+            return
+
         # 目标旋转在手部-根部局部坐标系中
         if getattr(self.cfg, "y_axis_only", False):
-            rand_floats = sample_uniform(-1.0, 1.0, (len(env_ids), 1), device=self.device)
+            goal_angles = sample_uniform(-1.0, 1.0, (len(env_ids), 1), device=self.device)[:, 0] * np.pi
             goal_rot_local = quat_from_angle_axis(
-                rand_floats[:, 0] * np.pi,
+                goal_angles,
                 self.y_unit_tensor[env_ids],
             )
             self.goal_rot[env_ids] = quat_mul(self.hand_base_rot[env_ids], goal_rot_local)
@@ -340,7 +359,7 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.goal_pos[env_ids] = self.hand_base_pos[env_ids] + goal_marker_offset
 
         goal_pos_w = self.goal_pos + self.scene.env_origins
-        if getattr(self.cfg, "use_yolo_student_obs", False):
+        if getattr(self.cfg, "use_yolo_student_obs", False) and getattr(self.cfg, "hide_goal_marker_from_yolo", False):
             # The marker uses the same tomato mesh and could be selected by
             # YOLO as a second object. Keep it out of all student cameras.
             goal_pos_w = torch.full_like(goal_pos_w, -10.0)
