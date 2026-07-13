@@ -23,6 +23,8 @@ class YoloSegImageEstimate:
     measurement_valid: torch.Tensor
     confidence: torch.Tensor
     mask_area: torch.Tensor
+    # Binary selected YOLO mask, shaped (num_envs, height, width).
+    mask_image: torch.Tensor
     anisotropy: torch.Tensor
     visible_ratio: torch.Tensor
 
@@ -115,6 +117,7 @@ class YoloSegImageEstimator:
         raw_angle_valid = torch.zeros_like(detection_valid)
         confidence = torch.zeros(self.num_envs, dtype=torch.float32, device=self.device)
         mask_area = torch.zeros_like(confidence)
+        mask_image = torch.zeros((self.num_envs, height, width), dtype=torch.bool, device=self.device)
         anisotropy = torch.zeros_like(confidence)
 
         for env_id, result in enumerate(results):
@@ -129,6 +132,7 @@ class YoloSegImageEstimator:
 
             confidence[env_id] = confidence_value
             mask_area[env_id] = float(pixel_count)
+            mask_image[env_id] = mask
             # Normalize around the optical image center. +X is right and +Y is
             # down, matching ordinary image coordinates and real-camera use.
             position_measurement[env_id, 0] = 2.0 * columns.to(torch.float32).mean() / max(width - 1, 1) - 1.0
@@ -161,6 +165,7 @@ class YoloSegImageEstimator:
             measurement_valid=measurement_valid,
             confidence=confidence,
             mask_area=mask_area,
+            mask_image=mask_image,
             anisotropy=anisotropy,
             visible_ratio=visible_ratio,
         )

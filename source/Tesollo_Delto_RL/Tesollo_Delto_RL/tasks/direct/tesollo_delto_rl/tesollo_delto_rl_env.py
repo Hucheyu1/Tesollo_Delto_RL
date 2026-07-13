@@ -132,6 +132,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # YOLO is only initialized for the distillation student. The teacher,
         # rewards and termination logic continue to use simulator ground truth.
         self.yolo_student_estimator = None
+        self.last_yolo_estimate = None
+        self.last_yolo_target_angle_features = None
+        self.last_yolo_observed_object_y = None
+        self.last_yolo_object_y_angle = None
+        self.last_yolo_goal_y_angle = None
         if getattr(self.cfg, "use_yolo_student_obs", False):
             from .yolo_seg_image_estimator import YoloSegImageEstimator
 
@@ -477,6 +482,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
             angle_features,
             uncalibrated_features,
         )
+        self.last_yolo_estimate = estimate
+        self.last_yolo_target_angle_features = angle_features.clone()
+        self.last_yolo_observed_object_y = observed_object_y.clone()
+        self.last_yolo_object_y_angle = object_y_angle.clone()
+        self.last_yolo_goal_y_angle = goal_y_angle.clone()
 
         if "log" not in self.extras:
             self.extras["log"] = dict()
