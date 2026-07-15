@@ -627,23 +627,44 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # 2. Reset object root pose: 放回 object_cfg.init_state
         # ---------------------------------------------------------------------
         object_root_state = self.object.data.default_root_state[env_ids].clone()
+
+        fixed_object_pos = getattr(self.cfg, "fixed_object_pos", None)
+        if fixed_object_pos is not None:
+            object_pos = torch.tensor(fixed_object_pos, dtype=torch.float, device=self.device).view(1, 3)
+            object_root_state[:, 0:3] = object_pos.repeat(len(env_ids), 1)
+
+        fixed_object_rot = getattr(self.cfg, "fixed_object_rot", None)
+        fixed_object_y_angle = getattr(self.cfg, "fixed_object_y_angle_rad", None)
+        fix_object_initial_pose = bool(getattr(self.cfg, "fix_object_initial_pose", False))
+
+        if fixed_object_rot is not None:
+            object_rot = torch.tensor(fixed_object_rot, dtype=torch.float, device=self.device).view(1, 4)
+            object_rot = object_rot / torch.linalg.vector_norm(object_rot, dim=-1, keepdim=True).clamp_min(1e-8)
+            object_root_state[:, 3:7] = object_rot.repeat(len(env_ids), 1)
+        elif fixed_object_y_angle is not None:
+            y_rot = quat_from_angle_axis(
+                torch.full((len(env_ids),), float(fixed_object_y_angle), dtype=torch.float, device=self.device),
+                self.y_unit_tensor[env_ids],
+            )
+            object_root_state[:, 3:7] = quat_mul(object_root_state[:, 3:7], y_rot)
+        elif not fix_object_initial_pose:
+            if getattr(self.cfg, "y_axis_only", False):
+                rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 1), device=self.device)
+                y_noise = quat_from_angle_axis(
+                    rot_noise[:, 0] * 20.0 / 180.0 * np.pi,
+                    self.y_unit_tensor[env_ids],
+                )
+                object_root_state[:, 3:7] = quat_mul(object_root_state[:, 3:7], y_noise)
+            else:
+                rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
+                object_root_state[:, 3:7] = randomize_rotation(
+                    rot_noise[:, 0] * 20.0 / 180.0,
+                    rot_noise[:, 1] * 20.0 / 180.0,
+                    self.x_unit_tensor[env_ids],
+                    self.y_unit_tensor[env_ids],
+                )
+
         object_root_state[:, :3] += self.scene.env_origins[env_ids]
-        if getattr(self.cfg, "y_axis_only", False):
-            rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 1), device=self.device)
-            y_noise = quat_from_angle_axis(
-                rot_noise[:, 0] * 20.0 / 180.0 * np.pi,
-                self.y_unit_tensor[env_ids],
-            )
-            object_root_state[:, 3:7] = quat_mul(object_root_state[:, 3:7], y_noise)
-        else:
-            # 如果你想完全固定初始姿态，就保持默认 rot，不随机
-            rot_noise = sample_uniform(-1.0, 1.0, (len(env_ids), 2), device=self.device)
-            object_root_state[:, 3:7] = randomize_rotation(
-                rot_noise[:, 0] * 20.0 / 180.0,
-                rot_noise[:, 1] * 20.0 / 180.0,
-                self.x_unit_tensor[env_ids],
-                self.y_unit_tensor[env_ids],
-            )
         object_root_state[:, 7:] = 0.0
 
         self.object.write_root_pose_to_sim(object_root_state[:, :7], env_ids)

@@ -69,6 +69,13 @@ parser.add_argument(
     help="正式记录前的相机/YOLO 预热步数；预热数据不保存。",
 )
 parser.add_argument(
+    "--no_reset_after_warmup",
+    "--no-reset-after-warmup",
+    action="store_true",
+    default=False,
+    help="默认会在 YOLO 预热后 reset 一次，让正式采集从固定初始位姿开始；打开该项则保留旧行为。",
+)
+parser.add_argument(
     "--output_dir",
     "--output-dir",
     type=str,
@@ -184,6 +191,48 @@ parser.add_argument(
     default=None,
     metavar=("W", "X", "Y", "Z"),
     help="直接固定 goal_rot，wxyz；优先级最高。",
+)
+
+# 可选固定番茄初始位姿。采集脚本默认固定 object_cfg.init_state 中的初始位姿，
+# 这样不同 env、不同 episode 的番茄起点一致；如需保留训练时随机初始姿态，可显式打开随机。
+parser.add_argument(
+    "--randomize_object_initial_pose",
+    "--randomize-object-initial-pose",
+    action="store_true",
+    default=False,
+    help="采集时保留环境原本的番茄初始姿态随机化；默认关闭随机化，让初始位姿一致。",
+)
+parser.add_argument(
+    "--object_pos",
+    "--object-pos",
+    type=float,
+    nargs=3,
+    default=None,
+    metavar=("X", "Y", "Z"),
+    help="可选：固定番茄 env-local 初始位置；默认使用 object_cfg.init_state.pos。",
+)
+parser.add_argument(
+    "--object_y_angle_deg",
+    "--object-y-angle-deg",
+    type=float,
+    default=None,
+    help="可选：固定番茄初始 Y 轴角，单位 degree。",
+)
+parser.add_argument(
+    "--object_y_angle_rad",
+    "--object-y-angle-rad",
+    type=float,
+    default=None,
+    help="可选：固定番茄初始 Y 轴角，单位 rad。",
+)
+parser.add_argument(
+    "--object_rot",
+    "--object-rot",
+    type=float,
+    nargs=4,
+    default=None,
+    metavar=("W", "X", "Y", "Z"),
+    help="可选：直接固定番茄初始四元数 wxyz；优先级高于 object_y_angle。",
 )
 
 cli_args.add_rsl_rl_args(parser)
@@ -497,6 +546,28 @@ def main(
             f"({env_cfg.fixed_goal_y_angle_rad:.6f} rad)"
         )
 
+    # 采集数据默认固定番茄初始位姿，避免同一数据集中 episode 起点不一致。
+    env_cfg.fix_object_initial_pose = not bool(args_cli.randomize_object_initial_pose)
+    if args_cli.object_pos is not None:
+        env_cfg.fixed_object_pos = tuple(float(v) for v in args_cli.object_pos)
+        print(f"[INFO] 固定番茄初始位置 env-local xyz: {env_cfg.fixed_object_pos}")
+    if args_cli.object_rot is not None:
+        env_cfg.fixed_object_rot = tuple(float(v) for v in args_cli.object_rot)
+        print(f"[INFO] 固定番茄初始四元数 wxyz: {env_cfg.fixed_object_rot}")
+    elif args_cli.object_y_angle_rad is not None:
+        env_cfg.fixed_object_y_angle_rad = float(args_cli.object_y_angle_rad)
+        print(f"[INFO] 固定番茄初始 Y 角: {env_cfg.fixed_object_y_angle_rad:.6f} rad")
+    elif args_cli.object_y_angle_deg is not None:
+        env_cfg.fixed_object_y_angle_rad = math.radians(float(args_cli.object_y_angle_deg))
+        print(
+            f"[INFO] 固定番茄初始 Y 角: {args_cli.object_y_angle_deg:.3f} deg "
+            f"({env_cfg.fixed_object_y_angle_rad:.6f} rad)"
+        )
+    if env_cfg.fix_object_initial_pose:
+        print("[INFO] 番茄初始位姿随机化已关闭：每次 reset 使用同一个初始位姿。")
+    else:
+        print("[INFO] 番茄初始位姿随机化已开启：采集会保留环境原本 reset 随机性。")
+
     agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
     env_cfg.seed = agent_cfg.seed
     env_cfg.sim.device = args_cli.device if args_cli.device is not None else env_cfg.sim.device
@@ -583,6 +654,16 @@ def main(
 
         print(f"[INFO] YOLO warmup {warmup_step + 1}/{args_cli.warmup_steps}")
 
+    if args_cli.warmup_steps > 0 and not args_cli.no_reset_after_warmup:
+        with torch.inference_mode():
+            obs, _ = env.reset()
+            reset_dones = torch.ones(base_env.num_envs, dtype=torch.bool, device=base_env.device)
+            if version.parse(installed_version) >= version.parse("4.0.0"):
+                policy.reset(reset_dones)
+            elif policy_nn is not None:
+                policy_nn.reset(reset_dones)
+        print("[INFO] YOLO 预热完成后已 reset，正式采集将从固定初始位姿开始。")
+
     # 正式记录开始时，从当前环境状态重新定义采集 episode 编号。
     buffers: dict[str, list[torch.Tensor]] = {}
     episode_id = torch.zeros(base_env.num_envs, dtype=torch.long, device=base_env.device)
@@ -668,6 +749,8 @@ def main(
         "rsl_rl_version": installed_version,
         "tensor_layout": "所有字段均为 [T, N, ...]；mask 为 [T, N, H, W]。",
         "saved_tensor_keys": sorted(expected_keys),
+        "warmup_steps": int(args_cli.warmup_steps),
+        "reset_after_warmup": bool(args_cli.warmup_steps > 0 and not args_cli.no_reset_after_warmup),
         "actuated_joint_names": getattr(base_env.cfg, "actuated_joint_names", None),
         "hand_joint_names": base_env.hand.joint_names if hasattr(base_env, "hand") else None,
         "yolo_model_path": str(Path(args_cli.yolo_model_path).expanduser().resolve()),
@@ -676,6 +759,10 @@ def main(
         "camera_position": list(args_cli.camera_pos),
         "camera_rotation_wxyz": list(args_cli.camera_rot),
         "camera_resolution_wh": [args_cli.camera_width, args_cli.camera_height],
+        "fix_object_initial_pose": bool(getattr(env_cfg, "fix_object_initial_pose", False)),
+        "fixed_object_pos": getattr(env_cfg, "fixed_object_pos", None),
+        "fixed_object_rot": getattr(env_cfg, "fixed_object_rot", None),
+        "fixed_object_y_angle_rad": getattr(env_cfg, "fixed_object_y_angle_rad", None),
         "yolo_position_note": "滤波二维中心，范围 [-1,1]，图像中心为 (0,0)，+Y 向下。",
         "yolo_angle_note": "滤波无方向轴角，范围 [0,pi)，theta 与 theta+pi 等价。",
         "yolo_mask_note": "当前帧二值分割 mask，uint8 0/1；不是时序滤波后的 mask。",

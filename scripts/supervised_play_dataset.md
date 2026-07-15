@@ -3,6 +3,7 @@
 这两个脚本用于把已经训练好的 RSL-RL policy 当作 teacher，在 `play` 过程中采集监督学习数据，然后训练一个直接的状态到动作映射网络。
 
 ## 1. 采集数据：`collect_play_dataset.py`
+
 ### 基本采集命令
 
 ```bash
@@ -17,6 +18,71 @@ python scripts/collect_play_dataset.py \
   --yolo_model_path /home/amlrobotics/hcy_ws/Tesollo_Delto_RL_main/scripts/yolo_seg_sim/best.pt \
   --num_steps 5000 \
   --output_dir datasets/play_supervised
+```
+
+### 番茄初始位姿与目标姿态
+
+当前 `collect_play_dataset.py` 的默认行为是：
+
+- 番茄初始位姿固定：每个 env、每条 episode reset 后都从同一个 object 初始位姿开始。
+- 目标姿态仍然随机：除非显式传入 `--goal_y_angle_deg`、`--goal_y_angle_rad` 或 `--goal_rot`。
+- YOLO 预热后会自动 reset 一次：保证正式采集的第 0 帧不是 policy 已经执行过几步后的状态。
+
+也就是说，如果不额外传 `--goal_*` 参数，采到的数据是：
+
+```text
+固定番茄起点 + 随机目标角度
+```
+
+如果希望固定目标角度，例如固定到 90 度：
+
+```bash
+python scripts/collect_play_dataset.py \
+  ... \
+  --goal_y_angle_deg 90
+```
+
+如果希望显式固定番茄初始 Y 轴角度：
+
+```bash
+python scripts/collect_play_dataset.py \
+  ... \
+  --object_y_angle_deg 0
+```
+
+如果希望直接指定番茄初始四元数，顺序为 `w x y z`：
+
+```bash
+python scripts/collect_play_dataset.py \
+  ... \
+  --object_rot 1 0 0 0
+```
+
+如果希望恢复环境原本的番茄初始姿态随机化：
+
+```bash
+python scripts/collect_play_dataset.py \
+  ... \
+  --randomize_object_initial_pose
+```
+
+默认情况下脚本会在 YOLO 预热后 reset 一次，让正式采集从固定初始位姿开始。如果想保留旧行为，即预热后不 reset：
+
+```bash
+python scripts/collect_play_dataset.py \
+  ... \
+  --no_reset_after_warmup
+```
+
+相关设置会写入 `.json` metadata：
+
+```text
+fix_object_initial_pose
+fixed_object_pos
+fixed_object_rot
+fixed_object_y_angle_rad
+warmup_steps
+reset_after_warmup
 ```
 
 输出文件：
@@ -53,7 +119,6 @@ tensors = data["tensors"]
 tensors["env_id"]
 tensors["episode_id"]
 tensors["episode_step"]
-tensors["done"]
 ```
 
 一条轨迹可以用下面这个 pair 唯一标识：
@@ -70,10 +135,28 @@ t = data["tensors"]
 
 mask = (t["env_id"] == 0) & (t["episode_id"] == 2)
 
-obs_traj = t["obs_policy"][mask]
-act_traj = t["action"][mask]
+joint_traj = t["hand_dof_pos"][mask]
+target_traj = t["target_pos"][mask]
+mask_traj = t["yolo_mask_pixels"][mask]
 ```
 
+当前精简采集脚本保存的主要字段为：
+
+```text
+global_step
+env_id
+episode_id
+episode_step
+hand_dof_pos
+tactile_binary
+goal_pos
+goal_rot
+cur_targets
+target_pos
+yolo_position_image
+yolo_angle_image_rad
+yolo_mask_pixels
+```
 
 ## 2. 监督训练：`train_supervised_policy.py`
 
@@ -88,7 +171,17 @@ scripts/train_supervised_policy.py
 默认训练：
 
 ```text
-obs_policy -> action
+历史输入：
+  hand_dof_pos
+  tactile_binary
+  yolo_position_image
+  yolo_angle_image_rad
+  yolo_mask_pixels
+  goal_pos
+  goal_rot
+
+监督目标：
+  target_pos
 ```
 
 ### 基本训练命令

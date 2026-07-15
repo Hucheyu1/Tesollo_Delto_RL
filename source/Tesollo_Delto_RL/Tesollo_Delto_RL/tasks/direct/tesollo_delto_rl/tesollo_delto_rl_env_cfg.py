@@ -232,6 +232,13 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     reset_dof_pos_noise = 0  # 关节位置重置噪声
     reset_dof_vel_noise = 0  # 关节速度重置噪声
 
+    # 可选固定番茄初始位姿。默认 False，保持训练时原来的随机初始姿态；
+    # collect/play 脚本可以在创建环境前打开该选项，让每条采集轨迹的番茄起点一致。
+    fix_object_initial_pose: bool = False
+    fixed_object_pos: tuple[float, float, float] | None = None
+    fixed_object_rot: tuple[float, float, float, float] | None = None
+    fixed_object_y_angle_rad: float | None = None
+
     # 手中目标配置：在物体初始局部位置基础上，沿手掌局部z方向稍微往内
     in_hand_local_offset = (-0.02, 0.0, -0.03)
     # Optional fixed target for play/debug. ``fixed_goal_y_angle_rad`` is a
