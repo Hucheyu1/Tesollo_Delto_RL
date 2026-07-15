@@ -1,619 +1,1092 @@
-# Copyright (c) 2022-2026, The Isaac Lab Project Developers
-# SPDX-License-Identifier: BSD-3-Clause
-
-"""Train a supervised state-to-action policy from collected play datasets.
-
-This script consumes datasets produced by ``scripts/collect_play_dataset.py``.
-The default behavior-cloning target is:
-
-    tensors["obs_policy"] -> tensors["action"]
-
-You can also build a richer state by concatenating multiple collected fields:
-
-    --input_keys hand_dof_pos,yolo_position_image,yolo_target_angle_features,tactile_binary,previous_action,goal_rot
-
-All tensors are flattened from ``[T, N, ...]`` to ``[T*N, ...]`` before
-training, while ``env_id`` / ``episode_id`` remain available in the dataset if
-you later want trajectory-aware sampling.
-"""
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
 
 from __future__ import annotations
 
 import argparse
 import json
-import math
-import random
 from dataclasses import asdict, dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any
 
+import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from torch.utils.data import DataLoader, TensorDataset
+from torch.utils.data import Dataset, DataLoader
+
+
+# ============================================================
+# Utils
+# ============================================================
+
+def make_cols(prefix: str, dim: int) -> list[str]:
+    return [f"{prefix}_{i:02d}" for i in range(dim)]
+
+
+def read_csv_auto(csv_path: str | Path) -> pd.DataFrame:
+    """
+    自动兼容逗号 CSV / tab CSV。
+    """
+    csv_path = Path(csv_path)
+    try:
+        df = pd.read_csv(csv_path)
+        if df.shape[1] <= 1:
+            df = pd.read_csv(csv_path, sep=None, engine="python")
+    except Exception:
+        df = pd.read_csv(csv_path, sep=None, engine="python")
+    return df
+
+
+def set_seed(seed: int):
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
+def add_history_suffix(policy_name: str, use_history_stack: bool) -> str:
+    """
+    使用历史帧时，自动给策略名追加 _history。
+
+    supervised_action_policy_no_vision + --use_history_stack
+    -> supervised_action_policy_no_vision_history
+    """
+    if use_history_stack and not policy_name.endswith("_history"):
+        return policy_name + "_history"
+    return policy_name
+
+
+def default_policy_name_from_obs_mode(obs_mode: str) -> str:
+    if obs_mode == "full":
+        return "supervised_action_policy_full"
+    if obs_mode == "no_vision":
+        return "supervised_action_policy_no_vision"
+    raise ValueError(f"Unknown obs_mode: {obs_mode}")
 
 
 @dataclass
-class TrainConfig:
-    datasets: list[str]
-    output_dir: str
-    run_name: str
-    input_keys: list[str]
-    target_key: str
-    mask_key: str | None
-    filter_valid_yolo: bool
-    exclude_done: bool
-    max_samples: int | None
-    val_fraction: float
-    batch_size: int
-    epochs: int
-    lr: float
-    weight_decay: float
-    hidden_dims: list[int]
-    activation: str
-    dropout: float
-    loss: str
-    normalize_inputs: bool
-    grad_clip: float | None
-    seed: int
-    device: str
+class DatasetInfo:
+    csv_paths: list[str]
+    obs_mode: str
+    use_history_stack: bool
+    history_len: int
+    history_include_previous_action: bool
+    input_dim: int
+    output_dim: int
+    input_cols: list[str]
+    target_cols: list[str]
+    target_mode: str
+    num_total_valid: int
+    num_train: int
+    num_val: int
+    num_trajectories: int
+    train_trajectories: list[str]
+    val_trajectories: list[str]
 
 
-class MLPPolicy(nn.Module):
-    """MLP policy with input normalization embedded in the module."""
+# ============================================================
+# Dataset
+# ============================================================
 
+class ActionDataset(Dataset):
+    def __init__(self, x: np.ndarray, y: np.ndarray):
+        assert x.ndim == 2
+        assert y.ndim == 2
+        assert x.shape[0] == y.shape[0]
+        self.x = torch.as_tensor(x, dtype=torch.float32)
+        self.y = torch.as_tensor(y, dtype=torch.float32)
+
+    def __len__(self):
+        return self.x.shape[0]
+
+    def __getitem__(self, index: int):
+        return self.x[index], self.y[index]
+
+
+# ============================================================
+# Model
+# ============================================================
+
+class ActionMLP(nn.Module):
     def __init__(
         self,
         input_dim: int,
-        action_dim: int,
-        hidden_dims: list[int],
-        *,
-        activation: str = "elu",
-        dropout: float = 0.0,
-        input_mean: torch.Tensor | None = None,
-        input_std: torch.Tensor | None = None,
-    ) -> None:
+        output_dim: int = 20,
+        hidden_dims=(256, 256, 128),
+        dropout: float = 0.1,
+    ):
         super().__init__()
-        self.input_dim = int(input_dim)
-        self.action_dim = int(action_dim)
-        self.hidden_dims = list(hidden_dims)
-        self.activation_name = activation
-        self.dropout = float(dropout)
-
-        if input_mean is None:
-            input_mean = torch.zeros(self.input_dim, dtype=torch.float32)
-        if input_std is None:
-            input_std = torch.ones(self.input_dim, dtype=torch.float32)
-        self.register_buffer("input_mean", input_mean.to(dtype=torch.float32).view(1, -1))
-        self.register_buffer("input_std", input_std.to(dtype=torch.float32).view(1, -1).clamp_min(1e-6))
-
         layers: list[nn.Module] = []
-        last_dim = self.input_dim
+        last_dim = input_dim
+
         for hidden_dim in hidden_dims:
+            hidden_dim = int(hidden_dim)
             layers.append(nn.Linear(last_dim, hidden_dim))
-            layers.append(_make_activation(activation))
+            layers.append(nn.ELU())
             if dropout > 0.0:
-                layers.append(nn.Dropout(dropout))
+                layers.append(nn.Dropout(p=dropout))
             last_dim = hidden_dim
-        layers.append(nn.Linear(last_dim, self.action_dim))
+
+        layers.append(nn.Linear(last_dim, output_dim))
         self.net = nn.Sequential(*layers)
 
-    def forward(self, obs: torch.Tensor) -> torch.Tensor:
-        obs = (obs - self.input_mean) / self.input_std
-        return self.net(obs)
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.net(x)
 
 
-def _make_activation(name: str) -> nn.Module:
-    name = name.lower()
-    if name == "elu":
-        return nn.ELU()
-    if name == "relu":
-        return nn.ReLU()
-    if name == "silu":
-        return nn.SiLU()
-    if name == "tanh":
-        return nn.Tanh()
-    if name == "gelu":
-        return nn.GELU()
-    raise ValueError(f"Unsupported activation: {name}")
+class NormalizedPolicy(nn.Module):
+    """
+    部署用模型。
+
+    输入 raw obs，内部自动 normalize；输出 raw target/action。
+    """
+    def __init__(
+        self,
+        model: nn.Module,
+        input_mean: torch.Tensor,
+        input_std: torch.Tensor,
+        target_mean: torch.Tensor,
+        target_std: torch.Tensor,
+    ):
+        super().__init__()
+        self.model = model
+        self.register_buffer("input_mean", input_mean)
+        self.register_buffer("input_std", input_std)
+        self.register_buffer("target_mean", target_mean)
+        self.register_buffer("target_std", target_std)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x_norm = (x - self.input_mean) / self.input_std
+        y_norm = self.model(x_norm)
+        y = y_norm * self.target_std + self.target_mean
+        return y
 
 
-def _parse_csv(value: str) -> list[str]:
-    return [item.strip() for item in value.split(",") if item.strip()]
+# ============================================================
+# CSV loading
+# ============================================================
 
-
-def _parse_hidden_dims(value: str) -> list[int]:
-    dims = [int(item.strip()) for item in value.split(",") if item.strip()]
-    if not dims:
-        raise ValueError("--hidden_dims must contain at least one hidden layer size.")
-    if any(dim <= 0 for dim in dims):
-        raise ValueError("--hidden_dims values must be positive.")
-    return dims
-
-
-def _flatten_samples(tensor: torch.Tensor, sample_shape: tuple[int, int]) -> torch.Tensor:
-    """Flatten [T, N, ...] into [T*N, feature_dim]."""
-
-    if tensor.shape[:2] != sample_shape:
-        raise ValueError(f"Expected leading shape {sample_shape}, got {tuple(tensor.shape)}.")
-    flat = tensor.reshape(sample_shape[0] * sample_shape[1], *tensor.shape[2:])
-    return flat.reshape(flat.shape[0], -1)
-
-
-def _flatten_mask(tensor: torch.Tensor, sample_shape: tuple[int, int]) -> torch.Tensor:
-    if tensor.shape[:2] != sample_shape:
-        raise ValueError(f"Expected mask leading shape {sample_shape}, got {tuple(tensor.shape)}.")
-    mask = tensor.reshape(sample_shape[0] * sample_shape[1], *tensor.shape[2:])
-    if mask.ndim > 1:
-        mask = mask.reshape(mask.shape[0], -1).all(dim=-1)
-    return mask.to(dtype=torch.bool)
-
-
-def _load_dataset(path: Path) -> tuple[dict[str, torch.Tensor], dict[str, Any]]:
-    data = torch.load(path, map_location="cpu", weights_only=False)
-    if isinstance(data, dict) and "tensors" in data:
-        tensors = data["tensors"]
-        metadata = data.get("metadata", {})
-    elif isinstance(data, dict):
-        tensors = data
-        metadata = {}
+def resolve_csv_paths(args: argparse.Namespace) -> list[Path]:
+    if args.csvs is not None and len(args.csvs) > 0:
+        csv_paths = [Path(p) for p in args.csvs]
     else:
-        raise ValueError(f"Unsupported dataset format in {path}. Expected a dict.")
-    if not isinstance(tensors, dict):
-        raise ValueError(f"Dataset {path} has no tensor dictionary.")
-    return tensors, metadata
+        csv_dir = Path(args.csv_dir)
+        csv_paths = sorted(csv_dir.glob(args.csv_pattern))
 
-
-def _build_xy_from_dataset(
-    *,
-    path: Path,
-    input_keys: list[str],
-    target_key: str,
-    mask_key: str | None,
-    filter_valid_yolo: bool,
-    exclude_done: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, dict[str, Any]]:
-    tensors, metadata = _load_dataset(path)
-    for key in input_keys + [target_key]:
-        if key not in tensors:
-            raise KeyError(f"Dataset {path} does not contain tensor key '{key}'.")
-
-    first = tensors[input_keys[0]]
-    if first.ndim < 2:
-        raise ValueError(f"Tensor '{input_keys[0]}' in {path} must have at least [T, N] dimensions.")
-    sample_shape = tuple(first.shape[:2])
-
-    input_parts = []
-    input_dims: dict[str, int] = {}
-    for key in input_keys:
-        part = _flatten_samples(tensors[key], sample_shape).to(dtype=torch.float32)
-        input_parts.append(part)
-        input_dims[key] = int(part.shape[-1])
-    x = torch.cat(input_parts, dim=-1)
-    y = _flatten_samples(tensors[target_key], sample_shape).to(dtype=torch.float32)
-
-    mask = torch.ones(x.shape[0], dtype=torch.bool)
-    if mask_key:
-        if mask_key not in tensors:
-            raise KeyError(f"Dataset {path} does not contain mask key '{mask_key}'.")
-        mask &= _flatten_mask(tensors[mask_key], sample_shape)
-    if filter_valid_yolo:
-        if "valid_sample_mask" in tensors:
-            mask &= _flatten_mask(tensors["valid_sample_mask"], sample_shape)
-        elif "yolo_position_valid" in tensors and "yolo_measurement_valid" in tensors:
-            mask &= _flatten_mask(tensors["yolo_position_valid"], sample_shape)
-            mask &= _flatten_mask(tensors["yolo_measurement_valid"], sample_shape)
-        else:
-            print(f"[WARN] {path} has no YOLO validity tensors; --filter_valid_yolo is ignored for this file.")
-    if exclude_done and "done" in tensors:
-        mask &= ~_flatten_mask(tensors["done"], sample_shape)
-
-    finite_mask = torch.isfinite(x).all(dim=-1) & torch.isfinite(y).all(dim=-1)
-    mask &= finite_mask
-
-    info = {
-        "path": str(path),
-        "metadata": metadata,
-        "sample_shape": sample_shape,
-        "num_raw_samples": int(x.shape[0]),
-        "num_kept_samples": int(mask.sum().item()),
-        "input_dims": input_dims,
-        "target_dim": int(y.shape[-1]),
-    }
-    return x[mask], y[mask], mask, info
-
-
-def _load_training_data(cfg: TrainConfig) -> tuple[torch.Tensor, torch.Tensor, list[dict[str, Any]], dict[str, int]]:
-    xs: list[torch.Tensor] = []
-    ys: list[torch.Tensor] = []
-    infos: list[dict[str, Any]] = []
-    input_dims_ref: dict[str, int] | None = None
-    target_dim_ref: int | None = None
-
-    for dataset_path in cfg.datasets:
-        path = Path(dataset_path).expanduser()
-        x, y, _, info = _build_xy_from_dataset(
-            path=path,
-            input_keys=cfg.input_keys,
-            target_key=cfg.target_key,
-            mask_key=cfg.mask_key,
-            filter_valid_yolo=cfg.filter_valid_yolo,
-            exclude_done=cfg.exclude_done,
+    csv_paths = [p for p in csv_paths if p.exists() and p.is_file()]
+    if not csv_paths:
+        raise FileNotFoundError(
+            f"No CSV files found. csv_dir={args.csv_dir}, "
+            f"pattern={args.csv_pattern}, csvs={args.csvs}"
         )
-        if x.numel() == 0:
-            print(f"[WARN] No samples kept from {path}.")
-            continue
-        if input_dims_ref is None:
-            input_dims_ref = info["input_dims"]
-            target_dim_ref = info["target_dim"]
-        elif input_dims_ref != info["input_dims"] or target_dim_ref != info["target_dim"]:
-            raise ValueError(
-                f"Dataset {path} feature dimensions do not match previous datasets. "
-                f"Expected input={input_dims_ref}, target={target_dim_ref}; got input={info['input_dims']}, "
-                f"target={info['target_dim']}."
+    return csv_paths
+
+
+def load_multi_csv(args: argparse.Namespace) -> tuple[pd.DataFrame, list[str]]:
+    csv_paths = resolve_csv_paths(args)
+    dfs = []
+    csv_path_strs = []
+
+    for csv_path in csv_paths:
+        print(f"[LOAD CSV] {csv_path}")
+        df = read_csv_auto(csv_path)
+        dataset_name = csv_path.stem
+
+        df["dataset_name"] = dataset_name
+        df["source_csv"] = csv_path.name
+
+        if "source_file" not in df.columns:
+            df["source_file"] = csv_path.name
+
+        # 多个 CSV 里的 file_index 会重复，所以必须构造全局轨迹 ID。
+        if "file_index" in df.columns:
+            df["global_traj_id"] = (
+                df["dataset_name"].astype(str) + "::file_" + df["file_index"].astype(str)
             )
-        xs.append(x)
-        ys.append(y)
-        infos.append(info)
-        print(f"[INFO] Loaded {path}: kept {info['num_kept_samples']}/{info['num_raw_samples']} samples.")
+        else:
+            df["file_index"] = 0
+            df["global_traj_id"] = (
+                df["dataset_name"].astype(str) + "::" + df["source_file"].astype(str)
+            )
 
-    if not xs:
-        raise RuntimeError("No training samples were loaded.")
-    x_all = torch.cat(xs, dim=0)
-    y_all = torch.cat(ys, dim=0)
-    if cfg.max_samples is not None and cfg.max_samples > 0 and x_all.shape[0] > cfg.max_samples:
-        generator = torch.Generator().manual_seed(cfg.seed)
-        selected = torch.randperm(x_all.shape[0], generator=generator)[: cfg.max_samples]
-        x_all = x_all[selected]
-        y_all = y_all[selected]
-        print(f"[INFO] Subsampled to {cfg.max_samples} samples.")
-    return x_all, y_all, infos, input_dims_ref or {}
+        dfs.append(df)
+        csv_path_strs.append(str(csv_path))
+        print(f"           rows={len(df)}, cols={len(df.columns)}")
+
+    merged = pd.concat(dfs, axis=0, ignore_index=True)
+
+    print("")
+    print("[DATA] merged rows:", len(merged))
+    print("[DATA] merged cols:", len(merged.columns))
+    print("[DATA] num csv:", len(csv_path_strs))
+    print("[DATA] num trajectories:", merged["global_traj_id"].nunique())
+
+    return merged, csv_path_strs
 
 
-def _split_train_val(
-    x: torch.Tensor,
-    y: torch.Tensor,
-    *,
-    val_fraction: float,
-    seed: int,
-) -> tuple[TensorDataset, TensorDataset | None]:
-    if not 0.0 <= val_fraction < 1.0:
-        raise ValueError("--val_fraction must be in [0, 1).")
-    generator = torch.Generator().manual_seed(seed)
-    indices = torch.randperm(x.shape[0], generator=generator)
-    val_count = int(round(x.shape[0] * val_fraction))
-    if x.shape[0] > 1:
-        val_count = min(val_count, x.shape[0] - 1)
+# ============================================================
+# Input / Target building
+# ============================================================
+
+def build_previous_actions(df: pd.DataFrame, action_cols: list[str]) -> pd.DataFrame:
+    """
+    构造 previous_action。
+
+    训练阶段必须按 global_traj_id 分组，避免多个 CSV / pkl 之间串帧。
+    """
+    missing = [c for c in action_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"CSV 缺少 actions 列，无法构造 previous_action: {missing}")
+
+    prev = df.groupby("global_traj_id")[action_cols].shift(1)
+    prev = prev.fillna(0.0)
+    prev.columns = make_cols("previous_action", 20)
+    return prev
+
+
+def build_target(df: pd.DataFrame, target_mode: str) -> pd.DataFrame:
+    action_cols = make_cols("actions", 20)
+    joint_cols = make_cols("tesollo_joints_state", 20)
+
+    missing_action = [c for c in action_cols if c not in df.columns]
+    if missing_action:
+        raise KeyError(f"CSV 缺少 actions 列: {missing_action}")
+
+    if target_mode == "actions":
+        target = df[action_cols].copy()
+        target.columns = action_cols
+        return target
+
+    if target_mode == "action_delta":
+        prev_action = df.groupby("global_traj_id")[action_cols].shift(1).fillna(0.0)
+        target_np = df[action_cols].to_numpy(dtype=np.float32) - prev_action.to_numpy(dtype=np.float32)
+        return pd.DataFrame(target_np, columns=action_cols)
+
+    if target_mode == "next_actions":
+        target = df.groupby("global_traj_id")[action_cols].shift(-1)
+        target.columns = action_cols
+        return target
+
+    if target_mode == "next_joint_delta":
+        missing_joint = [c for c in joint_cols if c not in df.columns]
+        if missing_joint:
+            raise KeyError(f"CSV 缺少关节列，无法构造 next_joint_delta: {missing_joint}")
+        next_joint = df.groupby("global_traj_id")[joint_cols].shift(-1)
+        current_joint = df[joint_cols]
+        target_np = next_joint.to_numpy(dtype=np.float32) - current_joint.to_numpy(dtype=np.float32)
+        return pd.DataFrame(target_np, columns=action_cols)
+
+    raise ValueError(f"Unknown target_mode: {target_mode}")
+
+
+def get_single_frame_base_cols(obs_mode: str) -> tuple[list[str], int]:
+    ball_cols = make_cols("ball_center", 4)
+    tactile_cols = make_cols("tactile_data", 13)
+    joint_cols = make_cols("tesollo_joints_state", 20)
+
+    if obs_mode == "full":
+        return ball_cols + tactile_cols + joint_cols, 37
+    if obs_mode == "no_vision":
+        return tactile_cols + joint_cols, 33
+    raise ValueError(f"Unknown obs_mode: {obs_mode}")
+
+
+def build_history_stacked_features(
+    df: pd.DataFrame,
+    base_cols: list[str],
+    group_col: str,
+    history_len: int,
+) -> pd.DataFrame:
+    """
+    历史堆叠输入。
+
+    history_len=10 时：
+        [t-9, t-8, ..., t-1, t]
+
+    轨迹开头不足 history_len 的部分不补齐，直接保留 NaN。
+    后续会通过 finite_mask 自动过滤掉这些样本。
+
+    例如 history_len=10:
+        每条轨迹的前 9 帧都会被舍弃。
+    """
+    if history_len <= 0:
+        raise ValueError(f"history_len must be > 0, got {history_len}")
+
+    missing = [c for c in base_cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"CSV 缺少历史堆叠需要的列: {missing}")
+
+    if group_col not in df.columns:
+        raise KeyError(f"CSV 缺少分组列: {group_col}")
+
+    parts = []
+
+    # 从旧到新排列：
+    # history_len=10 时：
+    # lag=9 -> t-9
+    # lag=8 -> t-8
+    # ...
+    # lag=0 -> t
+    for lag in range(history_len - 1, -1, -1):
+        shifted = df.groupby(group_col)[base_cols].shift(lag)
+
+        # 不再 bfill，也不 fillna。
+        # 轨迹开头不足 history_len 的样本会保留 NaN，
+        # 后续 finite_mask 会把它们过滤掉。
+        shifted.columns = [f"hist_{lag:02d}_{c}" for c in base_cols]
+
+        parts.append(shifted)
+
+    history_df = pd.concat(parts, axis=1)
+    return history_df
+
+
+def build_input_dataframe(df: pd.DataFrame, args: argparse.Namespace) -> tuple[pd.DataFrame, list[str], int]:
+    """
+    保留旧功能，同时新增历史帧输入。
+
+    旧功能：
+        full      = ball(4) + tactile(13) + joint(20) + previous_action(20) = 57
+        no_vision = tactile(13) + joint(20) + previous_action(20) = 53
+
+    新功能 --use_history_stack:
+        full      = history_len * [ball(4) + tactile(13) + joint(20)]
+        no_vision = history_len * [tactile(13) + joint(20)]
+
+    可选 --history_include_previous_action: 
+        在历史堆叠后额外拼接 previous_action(20)。
+    """
+    action_cols = make_cols("actions", 20)
+    base_cols, single_step_dim = get_single_frame_base_cols(args.obs_mode)
+
+    required_cols = list(base_cols) + action_cols
+    missing = [c for c in sorted(set(required_cols)) if c not in df.columns]
+    if missing:
+        raise KeyError(f"CSV 缺少这些列: {missing}")
+
+    prev_action_df = build_previous_actions(df, action_cols)
+
+    if args.use_history_stack:
+        history_df = build_history_stacked_features(
+            df=df,
+            base_cols=base_cols,
+            group_col="global_traj_id",
+            history_len=args.history_len,
+        )
+
+        if args.history_include_previous_action:
+            input_df = pd.concat([history_df, prev_action_df], axis=1)
+            expected_input_dim = args.history_len * single_step_dim + 20
+        else:
+            input_df = history_df
+            expected_input_dim = args.history_len * single_step_dim
     else:
-        val_count = 0
-    val_indices = indices[:val_count]
-    train_indices = indices[val_count:]
-    train_ds = TensorDataset(x[train_indices], y[train_indices])
-    val_ds = TensorDataset(x[val_indices], y[val_indices]) if val_count > 0 else None
-    return train_ds, val_ds
+        raw_df = df[base_cols].copy()
+        input_df = pd.concat([raw_df, prev_action_df], axis=1)
+        expected_input_dim = single_step_dim + 20
+
+    input_cols = list(input_df.columns)
+    return input_df, input_cols, int(expected_input_dim)
 
 
-def _loss_fn(pred: torch.Tensor, target: torch.Tensor, loss_name: str) -> torch.Tensor:
-    if loss_name == "mse":
-        return F.mse_loss(pred, target)
-    if loss_name == "smooth_l1":
-        return F.smooth_l1_loss(pred, target)
-    if loss_name == "l1":
-        return F.l1_loss(pred, target)
-    raise ValueError(f"Unsupported loss: {loss_name}")
+def split_train_val_by_trajectory(
+    x_all: np.ndarray,
+    y_all: np.ndarray,
+    traj_ids_all: np.ndarray,
+    val_ratio: float,
+    seed: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, list[str], list[str]]:
+    rng = np.random.default_rng(seed)
+    unique_trajs = np.unique(traj_ids_all)
 
+    if len(unique_trajs) >= 2:
+        shuffled = unique_trajs.copy()
+        rng.shuffle(shuffled)
+
+        num_val = max(1, int(len(shuffled) * val_ratio))
+        num_val = min(len(shuffled) - 1, num_val)
+
+        val_trajs = set(shuffled[:num_val].tolist())
+        train_trajs = set(shuffled[num_val:].tolist())
+
+        train_mask = np.array([traj in train_trajs for traj in traj_ids_all])
+        val_mask = np.array([traj in val_trajs for traj in traj_ids_all])
+
+        train_traj_list = sorted(list(train_trajs))
+        val_traj_list = sorted(list(val_trajs))
+    else:
+        print("[WARN] only one trajectory found, fallback to random row split")
+        indices = np.arange(len(x_all))
+        rng.shuffle(indices)
+
+        num_val = max(1, int(len(indices) * val_ratio))
+        num_val = min(len(indices) - 1, num_val)
+
+        val_indices = indices[:num_val]
+        train_indices = indices[num_val:]
+
+        train_mask = np.zeros(len(x_all), dtype=bool)
+        val_mask = np.zeros(len(x_all), dtype=bool)
+        train_mask[train_indices] = True
+        val_mask[val_indices] = True
+
+        train_traj_list = unique_trajs.astype(str).tolist()
+        val_traj_list = unique_trajs.astype(str).tolist()
+
+    return (
+        x_all[train_mask],
+        y_all[train_mask],
+        x_all[val_mask],
+        y_all[val_mask],
+        train_traj_list,
+        val_traj_list,
+    )
+
+
+def load_dataset_from_multi_csv(args: argparse.Namespace):
+    df, csv_path_strs = load_multi_csv(args)
+
+    joint_cols = make_cols("tesollo_joints_state", 20)
+    action_cols = make_cols("actions", 20)
+
+    input_df, input_cols, expected_input_dim = build_input_dataframe(df, args)
+    target_df = build_target(df, args.target_mode)
+
+    # next_joint_delta 需要 joint_cols，这里额外检查一下。
+    if args.target_mode == "next_joint_delta":
+        missing_joint = [c for c in joint_cols if c not in df.columns]
+        if missing_joint:
+            raise KeyError(f"CSV 缺少关节列: {missing_joint}")
+
+    x_all = input_df.to_numpy(dtype=np.float32)
+    y_all = target_df.to_numpy(dtype=np.float32)
+
+    finite_mask = np.isfinite(x_all).all(axis=1) & np.isfinite(y_all).all(axis=1)
+
+    df_valid = df.loc[finite_mask].copy()
+    x_all = x_all[finite_mask]
+    y_all = y_all[finite_mask]
+
+    if len(x_all) == 0:
+        raise RuntimeError("没有有效样本，请检查 CSV、target_mode 或 NaN/Inf。")
+
+    traj_ids_all = df_valid["global_traj_id"].astype(str).to_numpy()
+    unique_trajs = np.unique(traj_ids_all)
+
+    print("")
+    print("[DATA] obs_mode:", args.obs_mode)
+    print("[DATA] use_history_stack:", args.use_history_stack)
+    print("[DATA] history_len:", args.history_len)
+    print("[DATA] history_include_previous_action:", args.history_include_previous_action)
+    print("[DATA] valid samples:", len(x_all))
+    print("[DATA] input dim:", x_all.shape[1])
+    print("[DATA] expected input dim:", expected_input_dim)
+    print("[DATA] output dim:", y_all.shape[1])
+    print("[DATA] valid trajectories:", len(unique_trajs))
+
+    if x_all.shape[1] != expected_input_dim:
+        raise RuntimeError(f"输入维度错误，期望 {expected_input_dim}，实际 {x_all.shape[1]}")
+    if y_all.shape[1] != 20:
+        raise RuntimeError(f"输出维度错误，期望 20，实际 {y_all.shape[1]}")
+
+    x_train, y_train, x_val, y_val, train_traj_list, val_traj_list = split_train_val_by_trajectory(
+        x_all=x_all,
+        y_all=y_all,
+        traj_ids_all=traj_ids_all,
+        val_ratio=args.val_ratio,
+        seed=args.seed,
+    )
+
+    if len(x_train) == 0 or len(x_val) == 0:
+        raise RuntimeError(f"训练集或验证集为空: train={len(x_train)}, val={len(x_val)}")
+
+    print("")
+    print("[SPLIT] train trajectories:", len(train_traj_list))
+    print("[SPLIT] val trajectories:", len(val_traj_list))
+    print("[SPLIT] train samples:", len(x_train))
+    print("[SPLIT] val samples:", len(x_val))
+    print("[SPLIT] example train traj:", train_traj_list[:5])
+    print("[SPLIT] example val traj:", val_traj_list[:5])
+
+    info = DatasetInfo(
+        csv_paths=csv_path_strs,
+        obs_mode=args.obs_mode,
+        use_history_stack=bool(args.use_history_stack),
+        history_len=int(args.history_len),
+        history_include_previous_action=bool(args.history_include_previous_action),
+        input_dim=int(expected_input_dim),
+        output_dim=20,
+        input_cols=input_cols,
+        target_cols=action_cols,
+        target_mode=args.target_mode,
+        num_total_valid=int(len(x_all)),
+        num_train=int(len(x_train)),
+        num_val=int(len(x_val)),
+        num_trajectories=int(len(unique_trajs)),
+        train_trajectories=train_traj_list,
+        val_trajectories=val_traj_list,
+    )
+
+    return x_train, y_train, x_val, y_val, info
+
+
+# ============================================================
+# Augmentation
+# ============================================================
+
+def build_input_group_indices(input_cols: list[str]) -> dict[str, list[int]]:
+    groups = {
+        "ball": [],
+        "tactile": [],
+        "joint": [],
+        "previous_action": [],
+    }
+
+    for i, col in enumerate(input_cols):
+        if "ball_center_" in col:
+            groups["ball"].append(i)
+        elif "tactile_data_" in col:
+            groups["tactile"].append(i)
+        elif "tesollo_joints_state_" in col:
+            groups["joint"].append(i)
+        elif "previous_action_" in col:
+            groups["previous_action"].append(i)
+
+    return groups
+
+
+def augment_input_norm(
+    x: torch.Tensor,
+    args: argparse.Namespace,
+    group_indices: dict[str, list[int]],
+) -> torch.Tensor:
+    if not args.use_augmentation:
+        return x
+
+    x = x.clone()
+
+    if args.input_noise_std > 0.0:
+        x = x + args.input_noise_std * torch.randn_like(x)
+
+    def add_noise(group_name: str, noise_std: float):
+        idx_list = group_indices.get(group_name, [])
+        if len(idx_list) == 0 or noise_std <= 0.0:
+            return
+        idx = torch.as_tensor(idx_list, dtype=torch.long, device=x.device)
+        x[:, idx] = x[:, idx] + noise_std * torch.randn_like(x[:, idx])
+
+    add_noise("ball", args.ball_noise_std)
+    add_noise("tactile", args.tactile_noise_std)
+    add_noise("joint", args.joint_noise_std)
+    add_noise("previous_action", args.prev_action_noise_std)
+
+    def dropout_group(group_name: str, prob: float):
+        idx_list = group_indices.get(group_name, [])
+        if len(idx_list) == 0 or prob <= 0.0:
+            return
+        idx = torch.as_tensor(idx_list, dtype=torch.long, device=x.device)
+        mask = torch.rand(x.shape[0], 1, device=x.device) < prob
+        x[:, idx] = torch.where(mask, torch.zeros_like(x[:, idx]), x[:, idx])
+
+    dropout_group("ball", args.ball_dropout_prob)
+    dropout_group("tactile", args.tactile_dropout_prob)
+
+    return x
+
+
+# ============================================================
+# Evaluation
+# ============================================================
 
 @torch.no_grad()
-def _evaluate(model: nn.Module, loader: DataLoader, device: torch.device, loss_name: str) -> dict[str, float]:
+def evaluate(
+    model: nn.Module,
+    loader: DataLoader,
+    device: torch.device,
+    loss_fn: nn.Module,
+    target_mean: torch.Tensor,
+    target_std: torch.Tensor,
+) -> dict[str, float]:
     model.eval()
+
     total_loss = 0.0
-    total_mse = 0.0
-    total_mae = 0.0
     total_count = 0
-    for x, y in loader:
-        x = x.to(device)
-        y = y.to(device)
-        pred = model(x)
-        batch_count = x.shape[0]
-        total_loss += float(_loss_fn(pred, y, loss_name).item()) * batch_count
-        total_mse += float(F.mse_loss(pred, y).item()) * batch_count
-        total_mae += float(F.l1_loss(pred, y).item()) * batch_count
-        total_count += batch_count
+    mae_raw_sum = 0.0
+    rmse_raw_sum = 0.0
+    max_abs_err = 0.0
+
+    target_mean_cpu = target_mean.cpu()
+    target_std_cpu = target_std.cpu()
+
+    for batch_x, batch_y in loader:
+        batch_x = batch_x.to(device, non_blocking=True)
+        batch_y = batch_y.to(device, non_blocking=True)
+
+        pred_norm = model(batch_x)
+        loss = loss_fn(pred_norm, batch_y)
+
+        pred_raw = pred_norm.cpu() * target_std_cpu + target_mean_cpu
+        target_raw = batch_y.cpu() * target_std_cpu + target_mean_cpu
+
+        err = pred_raw - target_raw
+        abs_err = torch.abs(err)
+
+        batch_size = batch_x.shape[0]
+        total_loss += loss.item() * batch_size
+        mae_raw_sum += abs_err.mean().item() * batch_size
+        rmse_raw_sum += torch.sqrt(torch.mean(err ** 2)).item() * batch_size
+        max_abs_err = max(max_abs_err, abs_err.max().item())
+        total_count += batch_size
+
     return {
-        "loss": total_loss / max(total_count, 1),
-        "mse": total_mse / max(total_count, 1),
-        "rmse": math.sqrt(total_mse / max(total_count, 1)),
-        "mae": total_mae / max(total_count, 1),
+        "loss": total_loss / max(1, total_count),
+        "mae_raw": mae_raw_sum / max(1, total_count),
+        "rmse_raw": rmse_raw_sum / max(1, total_count),
+        "max_abs_err": max_abs_err,
     }
 
 
-def _save_checkpoint(
-    *,
-    path: Path,
-    model: MLPPolicy,
-    optimizer: torch.optim.Optimizer,
-    cfg: TrainConfig,
-    epoch: int,
-    metrics: dict[str, float],
-    input_dims: dict[str, int],
-    source_infos: list[dict[str, Any]],
-) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    torch.save(
-        {
-            "model_state_dict": model.state_dict(),
-            "optimizer_state_dict": optimizer.state_dict(),
-            "epoch": epoch,
-            "metrics": metrics,
-            "config": asdict(cfg),
-            "input_dim": model.input_dim,
-            "action_dim": model.action_dim,
-            "hidden_dims": model.hidden_dims,
-            "activation": model.activation_name,
-            "dropout": model.dropout,
-            "input_keys": cfg.input_keys,
-            "input_dims": input_dims,
-            "target_key": cfg.target_key,
-            "source_datasets": source_infos,
-            "model_class": "MLPPolicy",
-        },
-        path,
-    )
+# ============================================================
+# Train
+# ============================================================
 
-
-def _export_torchscript(model: MLPPolicy, output_path: Path, device: torch.device) -> None:
-    model.eval()
-    example = torch.zeros(1, model.input_dim, dtype=torch.float32, device=device)
-    traced = torch.jit.trace(model, example)
-    traced.save(str(output_path))
-
-
-def _make_run_dir(output_dir: str, run_name: str | None) -> Path:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    name = run_name or f"supervised_policy_{timestamp}"
-    run_dir = Path(output_dir).expanduser() / name
-    run_dir.mkdir(parents=True, exist_ok=True)
-    return run_dir
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Path):
-        return str(value)
-    if isinstance(value, dict):
-        return {str(k): _jsonable(v) for k, v in value.items()}
-    if isinstance(value, list | tuple):
-        return [_jsonable(v) for v in value]
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().tolist()
-    if isinstance(value, float | int | str | bool) or value is None:
-        return value
-    return str(value)
-
-
-def _build_arg_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Train a supervised state-to-action policy.")
-    parser.add_argument("datasets", nargs="+", help="One or more .pt datasets from scripts/collect_play_dataset.py.")
-    parser.add_argument("--output_dir", "--output-dir", default="logs/supervised_policy", help="Root output folder.")
-    parser.add_argument("--run_name", "--run-name", default=None, help="Optional run folder name.")
-    parser.add_argument(
-        "--input_keys",
-        "--input-keys",
-        default="obs_policy",
-        help="Comma-separated tensor keys to concatenate as input features.",
-    )
-    parser.add_argument("--target_key", "--target-key", default="action", help="Tensor key used as target action.")
-    parser.add_argument("--mask_key", "--mask-key", default=None, help="Optional boolean tensor key for sample filtering.")
-    parser.add_argument(
-        "--filter_valid_yolo",
-        "--filter-valid-yolo",
-        action="store_true",
-        help="Keep only samples with valid YOLO position and angle measurements when those keys exist.",
-    )
-    parser.add_argument("--exclude_done", "--exclude-done", action="store_true", help="Drop samples whose done flag is true.")
-    parser.add_argument("--max_samples", "--max-samples", type=int, default=None, help="Optional random subsample cap.")
-    parser.add_argument("--val_fraction", "--val-fraction", type=float, default=0.1, help="Validation fraction.")
-    parser.add_argument("--batch_size", "--batch-size", type=int, default=1024, help="Batch size.")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of epochs.")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Learning rate.")
-    parser.add_argument("--weight_decay", "--weight-decay", type=float, default=1e-5, help="AdamW weight decay.")
-    parser.add_argument("--hidden_dims", "--hidden-dims", default="256,256,128", help="Comma-separated hidden dims.")
-    parser.add_argument("--activation", choices=("elu", "relu", "silu", "tanh", "gelu"), default="elu")
-    parser.add_argument("--dropout", type=float, default=0.0)
-    parser.add_argument("--loss", choices=("mse", "smooth_l1", "l1"), default="mse")
-    parser.add_argument("--no_normalize_inputs", "--no-normalize-inputs", action="store_true")
-    parser.add_argument("--grad_clip", "--grad-clip", type=float, default=1.0, help="Set <=0 to disable.")
-    parser.add_argument("--seed", type=int, default=42)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
-    parser.add_argument("--num_workers", "--num-workers", type=int, default=0)
-    parser.add_argument("--save_every", "--save-every", type=int, default=0, help="Save periodic checkpoints every N epochs.")
-    return parser
-
-
-def main() -> None:
-    args = _build_arg_parser().parse_args()
-    random.seed(args.seed)
-    torch.manual_seed(args.seed)
-
-    cfg = TrainConfig(
-        datasets=[str(Path(path).expanduser()) for path in args.datasets],
-        output_dir=args.output_dir,
-        run_name=args.run_name or "",
-        input_keys=_parse_csv(args.input_keys),
-        target_key=args.target_key,
-        mask_key=args.mask_key,
-        filter_valid_yolo=bool(args.filter_valid_yolo),
-        exclude_done=bool(args.exclude_done),
-        max_samples=args.max_samples,
-        val_fraction=float(args.val_fraction),
-        batch_size=int(args.batch_size),
-        epochs=int(args.epochs),
-        lr=float(args.lr),
-        weight_decay=float(args.weight_decay),
-        hidden_dims=_parse_hidden_dims(args.hidden_dims),
-        activation=args.activation,
-        dropout=float(args.dropout),
-        loss=args.loss,
-        normalize_inputs=not bool(args.no_normalize_inputs),
-        grad_clip=float(args.grad_clip) if args.grad_clip is not None and args.grad_clip > 0.0 else None,
-        seed=int(args.seed),
-        device=args.device,
-    )
-    if not cfg.input_keys:
-        raise ValueError("--input_keys must contain at least one key.")
-
-    run_dir = _make_run_dir(cfg.output_dir, args.run_name)
-    cfg.run_name = run_dir.name
-    print(f"[INFO] Output run dir: {run_dir}")
-    print(f"[INFO] Input keys: {cfg.input_keys}")
-    print(f"[INFO] Target key: {cfg.target_key}")
-
-    x, y, source_infos, input_dims = _load_training_data(cfg)
-    print(f"[INFO] Total samples: {x.shape[0]}")
-    print(f"[INFO] Input dim: {x.shape[-1]}, action dim: {y.shape[-1]}")
-
-    train_ds, val_ds = _split_train_val(x, y, val_fraction=cfg.val_fraction, seed=cfg.seed)
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=True,
-        num_workers=args.num_workers,
-        pin_memory=torch.device(cfg.device).type == "cuda",
-    )
-    val_loader = (
-        DataLoader(
-            val_ds,
-            batch_size=cfg.batch_size,
-            shuffle=False,
-            num_workers=args.num_workers,
-            pin_memory=torch.device(cfg.device).type == "cuda",
-        )
-        if val_ds is not None
-        else None
-    )
-
-    if cfg.normalize_inputs:
-        input_mean = train_ds.tensors[0].mean(dim=0)
-        input_std = train_ds.tensors[0].std(dim=0, unbiased=False).clamp_min(1e-6)
+def resolve_output_dir(args: argparse.Namespace) -> Path:
+    if args.policy_name:
+        policy_name = args.policy_name
     else:
-        input_mean = torch.zeros(x.shape[-1])
-        input_std = torch.ones(x.shape[-1])
+        policy_name = default_policy_name_from_obs_mode(args.obs_mode)
 
-    device = torch.device(cfg.device)
-    model = MLPPolicy(
-        input_dim=x.shape[-1],
-        action_dim=y.shape[-1],
-        hidden_dims=cfg.hidden_dims,
-        activation=cfg.activation,
-        dropout=cfg.dropout,
-        input_mean=input_mean,
-        input_std=input_std,
+    policy_name = add_history_suffix(policy_name, args.use_history_stack)
+    args.policy_name = policy_name
+
+    if args.output_dir:
+        output_root = Path(args.output_dir)
+    else:
+        output_root = Path(args.log_root) / args.policy_name
+
+    output_dir = output_root / args.target_mode
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    args.output_root = str(output_root)
+    args.output_dir = str(output_dir)
+
+    print("[INFO] policy_name:", args.policy_name)
+    print("[INFO] output root:", output_root)
+    print("[INFO] output dir :", output_dir)
+
+    return output_dir
+
+
+def resolve_device(device_str: str) -> torch.device:
+    if device_str.startswith("cuda") and not torch.cuda.is_available():
+        print("[WARN] CUDA is not available, use CPU instead.")
+        return torch.device("cpu")
+    return torch.device(device_str)
+
+
+def train(args: argparse.Namespace):
+    set_seed(args.seed)
+    output_dir = resolve_output_dir(args)
+    device = resolve_device(args.device)
+
+    print("[INFO] device:", device)
+    print("[INFO] obs_mode:", args.obs_mode)
+    print("[INFO] target_mode:", args.target_mode)
+    print("[INFO] use_history_stack:", args.use_history_stack)
+    print("[INFO] history_len:", args.history_len)
+    print("[INFO] history_include_previous_action:", args.history_include_previous_action)
+
+    # -------------------------
+    # 1. Load data
+    # -------------------------
+    x_train, y_train, x_val, y_val, info = load_dataset_from_multi_csv(args)
+
+    # -------------------------
+    # 2. Normalize
+    # -------------------------
+    input_mean = torch.as_tensor(x_train.mean(axis=0), dtype=torch.float32)
+    input_std = torch.as_tensor(x_train.std(axis=0), dtype=torch.float32).clamp_min(args.norm_eps)
+
+    target_mean = torch.as_tensor(y_train.mean(axis=0), dtype=torch.float32)
+    target_std = torch.as_tensor(y_train.std(axis=0), dtype=torch.float32).clamp_min(args.norm_eps)
+
+    x_train_t = torch.as_tensor(x_train, dtype=torch.float32)
+    y_train_t = torch.as_tensor(y_train, dtype=torch.float32)
+    x_val_t = torch.as_tensor(x_val, dtype=torch.float32)
+    y_val_t = torch.as_tensor(y_val, dtype=torch.float32)
+
+    x_train_norm = (x_train_t - input_mean) / input_std
+    y_train_norm = (y_train_t - target_mean) / target_std
+    x_val_norm = (x_val_t - input_mean) / input_std
+    y_val_norm = (y_val_t - target_mean) / target_std
+
+    train_dataset = ActionDataset(x_train_norm.numpy(), y_train_norm.numpy())
+    val_dataset = ActionDataset(x_val_norm.numpy(), y_val_norm.numpy())
+
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+    )
+
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_memory,
+    )
+
+    # -------------------------
+    # 3. Model
+    # -------------------------
+    hidden_dims = tuple(args.hidden_dims)
+    model = ActionMLP(
+        input_dim=info.input_dim,
+        output_dim=info.output_dim,
+        hidden_dims=hidden_dims,
+        dropout=args.dropout,
     ).to(device)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
 
-    config_path = run_dir / "config.json"
-    with config_path.open("w", encoding="utf-8") as f:
-        json.dump(_jsonable({"config": asdict(cfg), "source_datasets": source_infos, "input_dims": input_dims}), f, indent=2)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer,
+        mode="min",
+        factor=args.lr_factor,
+        patience=args.lr_patience,
+        min_lr=args.min_lr,
+    )
+    loss_fn = nn.SmoothL1Loss(beta=args.huber_beta)
+    group_indices = build_input_group_indices(info.input_cols)
 
-    best_metric = float("inf")
-    best_epoch = -1
-    last_metrics: dict[str, float] = {}
+    # -------------------------
+    # 4. Train loop
+    # -------------------------
+    best_val_loss = float("inf")
+    best_epoch = 0
+    best_state: dict[str, torch.Tensor] | None = None
+    early_stop_counter = 0
+    log_rows = []
 
-    for epoch in range(1, cfg.epochs + 1):
+    print("")
+    print("[TRAIN] start supervised policy")
+    print("[TRAIN] input_dim:", info.input_dim)
+    print("[TRAIN] output_dim:", info.output_dim)
+    print("[TRAIN] hidden_dims:", hidden_dims)
+    print("[TRAIN] dropout:", args.dropout)
+    print("[TRAIN] weight_decay:", args.weight_decay)
+    print("[TRAIN] augmentation:", args.use_augmentation)
+    print("[TRAIN] group_indices size:", {k: len(v) for k, v in group_indices.items()})
+    print("")
+
+    for epoch in range(1, args.epochs + 1):
         model.train()
         train_loss_sum = 0.0
         train_count = 0
+
         for batch_x, batch_y in train_loader:
             batch_x = batch_x.to(device, non_blocking=True)
             batch_y = batch_y.to(device, non_blocking=True)
-            pred = model(batch_x)
-            loss = _loss_fn(pred, batch_y, cfg.loss)
+
+            batch_x_aug = augment_input_norm(batch_x, args, group_indices)
+            pred = model(batch_x_aug)
+            loss = loss_fn(pred, batch_y)
 
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
-            if cfg.grad_clip is not None:
-                nn.utils.clip_grad_norm_(model.parameters(), cfg.grad_clip)
+            nn.utils.clip_grad_norm_(model.parameters(), args.max_grad_norm)
             optimizer.step()
 
-            train_loss_sum += float(loss.item()) * batch_x.shape[0]
+            train_loss_sum += loss.item() * batch_x.shape[0]
             train_count += batch_x.shape[0]
 
-        train_loss = train_loss_sum / max(train_count, 1)
-        train_metrics = _evaluate(model, train_loader, device, cfg.loss)
-        val_metrics = _evaluate(model, val_loader, device, cfg.loss) if val_loader is not None else train_metrics
-        current_metric = val_metrics["mse"]
-        last_metrics = {
-            "train_loss_step": train_loss,
-            "train_loss": train_metrics["loss"],
-            "train_mse": train_metrics["mse"],
-            "train_rmse": train_metrics["rmse"],
-            "train_mae": train_metrics["mae"],
-            "val_loss": val_metrics["loss"],
-            "val_mse": val_metrics["mse"],
-            "val_rmse": val_metrics["rmse"],
-            "val_mae": val_metrics["mae"],
-        }
+        train_loss = train_loss_sum / max(1, train_count)
 
-        is_best = current_metric < best_metric
-        if is_best:
-            best_metric = current_metric
-            best_epoch = epoch
-            _save_checkpoint(
-                path=run_dir / "best.pt",
-                model=model,
-                optimizer=optimizer,
-                cfg=cfg,
-                epoch=epoch,
-                metrics=last_metrics,
-                input_dims=input_dims,
-                source_infos=source_infos,
-            )
-            _export_torchscript(model, run_dir / "policy_jit.pt", device)
-
-        if cfg.save_every > 0 and epoch % cfg.save_every == 0:
-            _save_checkpoint(
-                path=run_dir / f"epoch_{epoch:04d}.pt",
-                model=model,
-                optimizer=optimizer,
-                cfg=cfg,
-                epoch=epoch,
-                metrics=last_metrics,
-                input_dims=input_dims,
-                source_infos=source_infos,
-            )
-
-        print(
-            f"[INFO] epoch={epoch:04d}/{cfg.epochs} "
-            f"train_mse={last_metrics['train_mse']:.6e} train_mae={last_metrics['train_mae']:.6e} "
-            f"val_mse={last_metrics['val_mse']:.6e} val_mae={last_metrics['val_mae']:.6e} "
-            f"{'*' if is_best else ''}"
+        val_metrics = evaluate(
+            model=model,
+            loader=val_loader,
+            device=device,
+            loss_fn=loss_fn,
+            target_mean=target_mean,
+            target_std=target_std,
         )
 
-    _save_checkpoint(
-        path=run_dir / "last.pt",
-        model=model,
-        optimizer=optimizer,
-        cfg=cfg,
-        epoch=cfg.epochs,
-        metrics=last_metrics,
-        input_dims=input_dims,
-        source_infos=source_infos,
-    )
-    summary = {
-        "best_epoch": best_epoch,
-        "best_val_mse": best_metric,
-        "last_metrics": last_metrics,
-        "best_checkpoint": str(run_dir / "best.pt"),
-        "last_checkpoint": str(run_dir / "last.pt"),
-        "torchscript_policy": str(run_dir / "policy_jit.pt"),
-    }
-    with (run_dir / "summary.json").open("w", encoding="utf-8") as f:
-        json.dump(_jsonable(summary), f, indent=2)
+        val_loss = val_metrics["loss"]
+        scheduler.step(val_loss)
+        current_lr = optimizer.param_groups[0]["lr"]
 
-    print(f"[INFO] Best epoch: {best_epoch}, best val MSE: {best_metric:.6e}")
-    print(f"[INFO] Saved best checkpoint: {run_dir / 'best.pt'}")
-    print(f"[INFO] Saved TorchScript policy: {run_dir / 'policy_jit.pt'}")
+        improved = val_loss < best_val_loss - args.early_stop_min_delta
+        if improved:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            best_state = {
+                key: value.detach().cpu().clone()
+                for key, value in model.state_dict().items()
+            }
+            early_stop_counter = 0
+        else:
+            early_stop_counter += 1
+
+        row = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "val_mae_raw": val_metrics["mae_raw"],
+            "val_rmse_raw": val_metrics["rmse_raw"],
+            "val_max_abs_err": val_metrics["max_abs_err"],
+            "lr": current_lr,
+            "best_val_loss": best_val_loss,
+            "early_stop_counter": early_stop_counter,
+        }
+        log_rows.append(row)
+
+        if epoch == 1 or epoch % args.log_interval == 0 or improved:
+            mark = "*" if improved else " "
+            print(
+                f"[TRAIN]{mark} epoch={epoch:04d} "
+                f"train_loss={train_loss:.6f} "
+                f"val_loss={val_loss:.6f} "
+                f"val_mae_raw={val_metrics['mae_raw']:.6f} "
+                f"val_rmse_raw={val_metrics['rmse_raw']:.6f} "
+                f"val_max_abs_err={val_metrics['max_abs_err']:.6f} "
+                f"lr={current_lr:.2e} "
+                f"early={early_stop_counter}/{args.early_stop_patience}"
+            )
+
+        if early_stop_counter >= args.early_stop_patience:
+            print("")
+            print(
+                f"[EARLY STOP] epoch={epoch}, "
+                f"best_epoch={best_epoch}, "
+                f"best_val_loss={best_val_loss:.6f}"
+            )
+            break
+
+    # -------------------------
+    # 5. Restore best model
+    # -------------------------
+    if best_state is not None:
+        model.load_state_dict(best_state)
+
+    model_cpu = model.cpu().eval()
+
+    # -------------------------
+    # 6. Save checkpoint
+    # -------------------------
+    ckpt_path = output_dir / f"supervised_{args.target_mode}_policy.ckpt"
+
+    checkpoint = {
+        "model_state_dict": model_cpu.state_dict(),
+        "input_mean": input_mean,
+        "input_std": input_std,
+        "target_mean": target_mean,
+        "target_std": target_std,
+        "dataset_info": asdict(info),
+        "hidden_dims": hidden_dims,
+        "dropout": args.dropout,
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "args": vars(args),
+    }
+
+    torch.save(checkpoint, ckpt_path)
+
+    # -------------------------
+    # 7. Save deployable TorchScript model
+    # -------------------------
+    deploy_policy = NormalizedPolicy(
+        model=model_cpu,
+        input_mean=input_mean,
+        input_std=input_std,
+        target_mean=target_mean,
+        target_std=target_std,
+    ).cpu().eval()
+
+    jit_path = output_dir / f"supervised_{args.target_mode}_policy_jit.pt"
+    example_input = torch.zeros(1, info.input_dim, dtype=torch.float32)
+    with torch.no_grad():
+        traced = torch.jit.trace(deploy_policy, example_input)
+    traced.save(jit_path)
+
+    # -------------------------
+    # 8. Save metadata and train log
+    # -------------------------
+    metadata_path = output_dir / "metadata.json"
+    metadata = {
+        "dataset_info": asdict(info),
+        "checkpoint": str(ckpt_path),
+        "jit": str(jit_path),
+        "best_epoch": best_epoch,
+        "best_val_loss": best_val_loss,
+        "obs_mode": args.obs_mode,
+        "target_mode": args.target_mode,
+        "use_history_stack": bool(args.use_history_stack),
+        "history_len": int(args.history_len),
+        "history_include_previous_action": bool(args.history_include_previous_action),
+        "input_dim": info.input_dim,
+        "output_dim": info.output_dim,
+        "input_order": info.input_cols,
+        "target_order": info.target_cols,
+        "note": (
+            "Supervised policy. Old single-frame input is preserved when use_history_stack=False. "
+            "History-stacked input is enabled only when use_history_stack=True. "
+            "The JIT model internally normalizes input and denormalizes output."
+        ),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    log_path = output_dir / "train_log.csv"
+    pd.DataFrame(log_rows).to_csv(log_path, index=False)
+
+    print("")
+    print("[DONE] saved checkpoint:", ckpt_path)
+    print("[DONE] saved jit model:", jit_path)
+    print("[DONE] saved metadata:", metadata_path)
+    print("[DONE] saved train log:", log_path)
+    print("[DONE] best_epoch:", best_epoch)
+    print("[DONE] best_val_loss:", best_val_loss)
+
+
+# ============================================================
+# Args
+# ============================================================
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+
+    # 多 CSV 输入
+    parser.add_argument(
+        "--csv_dir",
+        type=str,
+        default="/home/amlrobotics/hcy_ws/delto_walnut_hcy/data/csv",
+        help="包含多个 CSV 的文件夹",
+    )
+    parser.add_argument(
+        "--csv_pattern",
+        type=str,
+        default="replay_data_*.csv",
+        help="从 csv_dir 里匹配哪些 CSV",
+    )
+    parser.add_argument(
+        "--csvs",
+        nargs="*",
+        default=None,
+        help="也可以手动指定多个 CSV 路径。指定后会忽略 csv_dir。",
+    )
+
+    # 输入模式
+    parser.add_argument(
+        "--obs_mode",
+        type=str,
+        default="no_vision",
+        choices=["full", "no_vision"],
+        help=(
+            "full: 使用 ball_center + tactile_data + tesollo_joints_state；"
+            "no_vision: 不使用 ball_center。"
+        ),
+    )
+    parser.add_argument(
+        "--use_history_stack",
+        action="store_true",
+        help="启用历史帧堆叠输入。启用后 policy_name 会自动追加 _history。",
+    )
+    parser.add_argument(
+        "--history_len",
+        type=int,
+        default=5,
+        help="历史堆叠长度。只有 --use_history_stack 时生效。",
+    )
+    parser.add_argument(
+        "--history_include_previous_action",
+        action="store_true",
+        help="历史堆叠输入后额外拼接 previous_action(20)。默认不拼接。",
+    )
+
+    # 输出目录
+    parser.add_argument(
+        "--log_root",
+        type=str,
+        default="/home/amlrobotics/hcy_ws/delto_walnut_hcy/logs",
+        help="所有策略日志的根目录。",
+    )
+    parser.add_argument(
+        "--policy_name",
+        type=str,
+        default="",
+        help=(
+            "策略名称。为空时根据 obs_mode 自动设置。"
+            "如果使用 --use_history_stack，会自动追加 _history 后缀。"
+        ),
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default="",
+        help="模型输出根目录。若指定，则实际保存到 output_dir/target_mode。",
+    )
+
+    # Target
+    parser.add_argument(
+        "--target_mode",
+        type=str,
+        default="actions",
+        choices=["actions", "action_delta", "next_actions", "next_joint_delta"],
+        help=(
+            "actions: 当前观测 -> 当前动作；"
+            "action_delta: 当前观测 -> 当前动作 - 上一帧动作；"
+            "next_actions: 当前观测 -> 下一帧动作；"
+            "next_joint_delta: 当前观测 -> 下一帧关节角 - 当前关节角。"
+        ),
+    )
+
+    # Model
+    parser.add_argument("--hidden_dims", nargs="+", type=int, default=[256, 256, 128])
+    parser.add_argument("--dropout", type=float, default=0.1)
+
+    # Train
+    parser.add_argument("--epochs", type=int, default=800)
+    parser.add_argument("--batch_size", type=int, default=512)
+    parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument("--min_lr", type=float, default=1e-5)
+    parser.add_argument("--lr_factor", type=float, default=0.5)
+    parser.add_argument("--lr_patience", type=int, default=20)
+    parser.add_argument("--weight_decay", type=float, default=1e-4)
+    parser.add_argument("--huber_beta", type=float, default=0.05)
+    parser.add_argument("--max_grad_norm", type=float, default=1.0)
+
+    # Split
+    parser.add_argument("--val_ratio", type=float, default=0.2)
+
+    # Normalization
+    parser.add_argument("--norm_eps", type=float, default=1e-6)
+
+    # Augmentation
+    parser.add_argument("--use_augmentation", action="store_true")
+    parser.add_argument("--input_noise_std", type=float, default=0.01)
+    parser.add_argument("--ball_noise_std", type=float, default=0.03)
+    parser.add_argument("--tactile_noise_std", type=float, default=0.02)
+    parser.add_argument("--joint_noise_std", type=float, default=0.01)
+    parser.add_argument("--prev_action_noise_std", type=float, default=0.01)
+    parser.add_argument("--ball_dropout_prob", type=float, default=0.02)
+    parser.add_argument("--tactile_dropout_prob", type=float, default=0.02)
+
+    # Early stopping
+    parser.add_argument("--early_stop_patience", type=int, default=60)
+    parser.add_argument("--early_stop_min_delta", type=float, default=1e-5)
+
+    # Runtime
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--device", type=str, default="cuda:0")
+    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--pin_memory", action="store_true")
+    parser.add_argument("--log_interval", type=int, default=10)
+
+    return parser.parse_args()
 
 
 if __name__ == "__main__":
-    main()
+    train(parse_args())
