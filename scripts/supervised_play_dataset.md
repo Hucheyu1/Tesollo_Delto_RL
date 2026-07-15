@@ -224,6 +224,32 @@ python scripts/play_supervised_policy.py \
 
 delta / absolute
 
+`play_supervised_policy.py` 的番茄初始位姿默认也会固定，并且默认会在 YOLO warmup 后 reset 一次，让正式测试从固定起点开始。这和 `collect_play_dataset.py` 的默认采集分布保持一致。
+
+如果希望显式指定测试时番茄初始角度：
+
+```bash
+python scripts/play_supervised_policy.py \
+  ... \
+  --object_y_angle_deg 0
+```
+
+如果希望恢复环境原本的随机初始姿态：
+
+```bash
+python scripts/play_supervised_policy.py \
+  ... \
+  --randomize_object_initial_pose
+```
+
+如果希望保留旧行为，即 warmup 后不 reset：
+
+```bash
+python scripts/play_supervised_policy.py \
+  ... \
+  --no_reset_after_warmup
+```
+
 主要输出：
 
 ```text

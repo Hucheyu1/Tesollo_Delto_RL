@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 from pathlib import Path
@@ -40,6 +41,53 @@ parser.add_argument(
 )
 
 parser.add_argument("--warmup_steps", type=int, default=5)
+parser.add_argument(
+    "--no_reset_after_warmup",
+    "--no-reset-after-warmup",
+    action="store_true",
+    default=False,
+    help="默认会在 YOLO warmup 后 reset 一次，让正式 play 从固定初始位姿开始；打开该项则保留旧行为。",
+)
+
+parser.add_argument(
+    "--randomize_object_initial_pose",
+    "--randomize-object-initial-pose",
+    action="store_true",
+    default=False,
+    help="play 时保留环境原本的番茄初始姿态随机化；默认关闭随机化，让初始位姿一致。",
+)
+parser.add_argument(
+    "--object_pos",
+    "--object-pos",
+    type=float,
+    nargs=3,
+    default=None,
+    metavar=("X", "Y", "Z"),
+    help="可选：固定番茄 env-local 初始位置；默认使用 object_cfg.init_state.pos。",
+)
+parser.add_argument(
+    "--object_y_angle_deg",
+    "--object-y-angle-deg",
+    type=float,
+    default=None,
+    help="可选：固定番茄初始 Y 轴角，单位 degree。",
+)
+parser.add_argument(
+    "--object_y_angle_rad",
+    "--object-y-angle-rad",
+    type=float,
+    default=None,
+    help="可选：固定番茄初始 Y 轴角，单位 rad。",
+)
+parser.add_argument(
+    "--object_rot",
+    "--object-rot",
+    type=float,
+    nargs=4,
+    default=None,
+    metavar=("W", "X", "Y", "Z"),
+    help="可选：直接固定番茄初始四元数 wxyz；优先级高于 object_y_angle。",
+)
 
 parser.add_argument(
     "--agent",
@@ -121,6 +169,17 @@ def _inject_yolo_cfg(env_cfg):
 
     env_cfg.scene.num_envs = args_cli.num_envs
 
+    # play 测试默认固定番茄初始位姿，和 collect_play_dataset.py 的默认采集分布对齐。
+    env_cfg.fix_object_initial_pose = not bool(args_cli.randomize_object_initial_pose)
+    if args_cli.object_pos is not None:
+        env_cfg.fixed_object_pos = tuple(float(v) for v in args_cli.object_pos)
+    if args_cli.object_rot is not None:
+        env_cfg.fixed_object_rot = tuple(float(v) for v in args_cli.object_rot)
+    elif args_cli.object_y_angle_rad is not None:
+        env_cfg.fixed_object_y_angle_rad = float(args_cli.object_y_angle_rad)
+    elif args_cli.object_y_angle_deg is not None:
+        env_cfg.fixed_object_y_angle_rad = math.radians(float(args_cli.object_y_angle_deg))
+
     # 开启你环境类中预留的 YOLO camera 创建逻辑
     env_cfg.use_yolo_student_obs = True
 
@@ -164,6 +223,17 @@ def _inject_yolo_cfg(env_cfg):
     # 真正的行为兼容由下面的 monkey patch 保证。
     env_cfg.action_mode = args_cli.supervised_action_mode
     env_cfg.use_absolute_target_action = args_cli.supervised_action_mode == "absolute"
+
+    if env_cfg.fix_object_initial_pose:
+        print("[INFO] 番茄初始位姿随机化已关闭：play 每次 reset 使用同一个初始位姿。")
+    else:
+        print("[INFO] 番茄初始位姿随机化已开启：play 会保留环境原本 reset 随机性。")
+    if args_cli.object_pos is not None:
+        print(f"[INFO] 固定番茄初始位置 env-local xyz: {env_cfg.fixed_object_pos}")
+    if args_cli.object_rot is not None:
+        print(f"[INFO] 固定番茄初始四元数 wxyz: {env_cfg.fixed_object_rot}")
+    elif getattr(env_cfg, "fixed_object_y_angle_rad", None) is not None:
+        print(f"[INFO] 固定番茄初始 Y 角: {env_cfg.fixed_object_y_angle_rad:.6f} rad")
 
     return env_cfg
 
@@ -467,14 +537,20 @@ def main(env_cfg, agent_cfg):
     if args_cli.video:
         video_folder = os.path.abspath(args_cli.video_dir)
         os.makedirs(video_folder, exist_ok=True)
+        video_start_step = (
+            args_cli.warmup_steps
+            if args_cli.warmup_steps > 0 and not args_cli.no_reset_after_warmup
+            else 0
+        )
 
         print(f"[INFO] Recording video to: {video_folder}")
         print(f"[INFO] Video length: {args_cli.video_length} steps")
+        print(f"[INFO] Video starts at env step: {video_start_step}")
 
         env = gym.wrappers.RecordVideo(
             env,
             video_folder=video_folder,
-            step_trigger=lambda step: step == 0,
+            step_trigger=lambda step: step == video_start_step,
             video_length=args_cli.video_length,
             disable_logger=True,
         )
@@ -525,6 +601,10 @@ def main(env_cfg, agent_cfg):
 
     for _ in range(args_cli.warmup_steps):
         obs, rewards, dones, extras = env.step(warmup_action)
+
+    if args_cli.warmup_steps > 0 and not args_cli.no_reset_after_warmup:
+        obs, _ = env.reset()
+        print("[INFO] YOLO warmup 完成后已 reset，正式 play 将从固定初始位姿开始。")
 
     # 计算第一帧 YOLO 和数值输入
     with torch.inference_mode():
