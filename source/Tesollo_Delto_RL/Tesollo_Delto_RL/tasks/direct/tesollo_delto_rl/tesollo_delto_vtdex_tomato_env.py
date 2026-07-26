@@ -5,11 +5,11 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
 import torch
-from pxr import Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -22,7 +22,24 @@ from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_angle_axis
 from .tesollo_delto_rl_env import TesolloDeltoRlEnv, unscale
 from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
 from .delto_cfg import TESOLLO_CFG
+from .vtdex_data import (
+    DG5F_VTDEX_CAMERA_CLIPPING_RANGE,
+    DG5F_VTDEX_CAMERA_EYE_LOCAL,
+    DG5F_VTDEX_CAMERA_FOCAL_LENGTH,
+    DG5F_VTDEX_CAMERA_FOCUS_DISTANCE,
+    DG5F_VTDEX_CAMERA_HORIZONTAL_APERTURE,
+    DG5F_VTDEX_CAMERA_RESOLUTION,
+    DG5F_VTDEX_CAMERA_TARGET_LOCAL,
+    DG5F_VTDEX_CONTACT_THRESHOLD_N,
+    DG5F_VTDEX_TACTILE_BODY_NAMES,
+    DG5F_VTDEX_TACTILE_INDICES,
+    DG5F_VTDEX_TOMATO_MARKER_DIFFUSE_COLORS,
+    DG5F_VTDEX_TOMATO_MARKER_EMISSIVE_COLORS,
+    DG5F_VTDEX_TOMATO_MARKER_OFFSETS,
+    DG5F_VTDEX_TOMATO_MARKER_RADIUS,
+)
 from .vtdex_encoder import VTDexJointEncoder
+from .vtdex_markers import spawn_tomato_orientation_markers
 
 
 _VTDEx_ROOT = Path(__file__).resolve().parent / "vtdex_pretrained"
@@ -48,32 +65,32 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
         debug_vis=False,
     )
     # Match reorient_up/down's binary tactile threshold (Newtons).
-    vtdex_contact_threshold = 0.01
+    vtdex_contact_threshold = DG5F_VTDEX_CONTACT_THRESHOLD_N
 
     vtdex_camera: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_.*/VTDexCamera",
         offset=CameraCfg.OffsetCfg(
             # An exact look-at pose is assigned after scene initialization.
-            pos=(0.11, 0.36, 0.36),
+            pos=DG5F_VTDEX_CAMERA_EYE_LOCAL,
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.0,
-            focus_distance=0.45,
-            horizontal_aperture=20.955,
-            clipping_range=(0.01, 1.5),
+            focal_length=DG5F_VTDEX_CAMERA_FOCAL_LENGTH,
+            focus_distance=DG5F_VTDEX_CAMERA_FOCUS_DISTANCE,
+            horizontal_aperture=DG5F_VTDEX_CAMERA_HORIZONTAL_APERTURE,
+            clipping_range=DG5F_VTDEX_CAMERA_CLIPPING_RANGE,
         ),
-        width=224,
-        height=224,
+        width=DG5F_VTDEX_CAMERA_RESOLUTION[0],
+        height=DG5F_VTDEX_CAMERA_RESOLUTION[1],
         update_latest_camera_pose=True,
         debug_vis=False,
     )
     # Environment-local eye and look-at point. The camera sits on the +Y side
     # and looks strictly along -Y at the nominal tomato center.
-    vtdex_camera_eye_local = (0.11, 0.36, 0.36)
-    vtdex_camera_target_local = (0.11, 0.00267, 0.36)
+    vtdex_camera_eye_local = DG5F_VTDEX_CAMERA_EYE_LOCAL
+    vtdex_camera_target_local = DG5F_VTDEX_CAMERA_TARGET_LOCAL
 
     # Two non-collinear colored dots make the otherwise near-spherical tomato
     # orientation observable. They are visual-only and must be reproduced on
@@ -81,18 +98,12 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
     show_tomato_orientation_markers = True
     # Both markers lie on the +Y hemisphere so that the -Y-facing camera can
     # observe them, while their non-collinear offsets still disambiguate pose.
-    tomato_orientation_marker_offsets = ((0.018, 0.028, 0.010), (-0.018, 0.028, -0.010))
+    tomato_orientation_marker_offsets = DG5F_VTDEX_TOMATO_MARKER_OFFSETS
     # Keep marker settings as plain Hydra-safe values. Nested config objects in
     # a tuple are converted to dictionaries during Hydra's round trip.
-    tomato_orientation_marker_radius = 0.005
-    tomato_orientation_marker_diffuse_colors = (
-        (0.02, 0.25, 1.0),
-        (1.0, 0.85, 0.02),
-    )
-    tomato_orientation_marker_emissive_colors = (
-        (0.0, 0.02, 0.15),
-        (0.12, 0.08, 0.0),
-    )
+    tomato_orientation_marker_radius = DG5F_VTDEX_TOMATO_MARKER_RADIUS
+    tomato_orientation_marker_diffuse_colors = DG5F_VTDEX_TOMATO_MARKER_DIFFUSE_COLORS
+    tomato_orientation_marker_emissive_colors = DG5F_VTDEX_TOMATO_MARKER_EMISSIVE_COLORS
 
     # actor = qpos(20) + qvel(20) + target position in hand frame(3)
     #       + target quaternion in hand frame(4) + binary tactile(20)
@@ -105,21 +116,19 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
 
     # Use the self-contained checkpoint copy shared with the upstream-scene
     # reproduction; this task no longer depends on an external checkout.
-    vtdex_repo_root = str(_VTDEx_ROOT)
-    vtdex_model_id = "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210"
+    vtdex_repo_root = os.environ.get("TESOLLO_VTDEX_REPO_ROOT", str(_VTDEx_ROOT))
+    vtdex_model_id = os.environ.get(
+        "TESOLLO_VTDEX_MODEL_ID",
+        "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210",
+    )
     vtdex_embedding_dim = 384
     # Match VTDex's layer-major token semantics: five fingers ordered
     # little/ring/middle/index/thumb at distal, then the same order at middle,
     # proximal and knuckle. DG5F's thumb-base link proxies the final Shadow-Hand
     # palm token. Keep this exact 20-channel order in the real robot node.
-    vtdex_tactile_body_names = (
-        "rl_dg_5_4", "rl_dg_4_4", "rl_dg_3_4", "rl_dg_2_4", "rl_dg_1_4",
-        "rl_dg_5_3", "rl_dg_4_3", "rl_dg_3_3", "rl_dg_2_3", "rl_dg_1_3",
-        "rl_dg_5_2", "rl_dg_4_2", "rl_dg_3_2", "rl_dg_2_2", "rl_dg_1_2",
-        "rl_dg_5_1", "rl_dg_4_1", "rl_dg_3_1", "rl_dg_2_1", "rl_dg_1_1",
-    )
+    vtdex_tactile_body_names = DG5F_VTDEX_TACTILE_BODY_NAMES
     fingertip_body_names = list(vtdex_tactile_body_names)
-    vtdex_tactile_indices = tuple(range(20))
+    vtdex_tactile_indices = DG5F_VTDEX_TACTILE_INDICES
 
     # Sample a reachable target position around the nominal in-hand point in
     # the hand-root frame. Orientation continues to use the base task's random
@@ -247,102 +256,14 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
 
         if not self.cfg.show_tomato_orientation_markers:
             return
-
-        marker_offsets = tuple(
-            tuple(float(value) for value in offset)
-            for offset in self.cfg.tomato_orientation_marker_offsets
+        spawn_tomato_orientation_markers(
+            object_asset=self.object,
+            num_envs=self.num_envs,
+            marker_offsets=self.cfg.tomato_orientation_marker_offsets,
+            marker_radius=self.cfg.tomato_orientation_marker_radius,
+            diffuse_colors=self.cfg.tomato_orientation_marker_diffuse_colors,
+            emissive_colors=self.cfg.tomato_orientation_marker_emissive_colors,
         )
-        diffuse_colors = tuple(
-            tuple(float(value) for value in color)
-            for color in self.cfg.tomato_orientation_marker_diffuse_colors
-        )
-        emissive_colors = tuple(
-            tuple(float(value) for value in color)
-            for color in self.cfg.tomato_orientation_marker_emissive_colors
-        )
-        if not (
-            len(marker_offsets) == len(diffuse_colors) == len(emissive_colors) == 2
-            and all(len(values) == 3 for values in marker_offsets + diffuse_colors + emissive_colors)
-        ):
-            raise ValueError(
-                "Tomato orientation markers require two 3-D offsets, diffuse colors, and emissive colors"
-            )
-        marker_radius = float(self.cfg.tomato_orientation_marker_radius)
-        if marker_radius <= 0.0:
-            raise ValueError("tomato_orientation_marker_radius must be positive")
-        marker_directions = torch.tensor(marker_offsets, dtype=torch.float64)
-        if not torch.isfinite(marker_directions).all() or (
-            torch.linalg.vector_norm(marker_directions, dim=-1) <= 1.0e-8
-        ).any():
-            raise ValueError("Tomato orientation marker offsets must be finite, non-zero directions")
-        marker_cfgs = tuple(
-            sim_utils.SphereCfg(
-                radius=marker_radius,
-                visual_material=sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=diffuse_color,
-                    emissive_color=emissive_color,
-                ),
-            )
-            for diffuse_color, emissive_color in zip(diffuse_colors, emissive_colors, strict=True)
-        )
-
-        rigid_prim_paths = tuple(str(path) for path in self.object.root_physx_view.prim_paths)
-        if len(rigid_prim_paths) != self.num_envs:
-            raise RuntimeError(
-                "Expected one tomato rigid-body prim per environment, got "
-                f"{len(rigid_prim_paths)} for {self.num_envs} environments"
-            )
-
-        stage = sim_utils.get_current_stage()
-        rigid_prim = stage.GetPrimAtPath(rigid_prim_paths[0])
-        bbox_cache = UsdGeom.BBoxCache(
-            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
-        )
-        local_range = bbox_cache.ComputeLocalBound(rigid_prim).ComputeAlignedRange()
-        if local_range.IsEmpty():
-            raise RuntimeError(f"Cannot compute tomato visual bounds below {rigid_prim_paths[0]}")
-
-        bounds_min = torch.tensor(tuple(local_range.GetMin()), dtype=torch.float64)
-        bounds_max = torch.tensor(tuple(local_range.GetMax()), dtype=torch.float64)
-        visual_center = 0.5 * (bounds_min + bounds_max)
-        visual_radii = 0.5 * (bounds_max - bounds_min)
-        if not torch.isfinite(visual_radii).all() or (visual_radii <= 1.0e-5).any():
-            raise RuntimeError(
-                f"Invalid tomato visual bounds: min={bounds_min.tolist()}, max={bounds_max.tolist()}"
-            )
-
-        # Configured values define two non-collinear directions on the +Y
-        # hemisphere. Intersect each ray with an ellipsoid fitted to the visual
-        # bounds so the sphere centers sit on the tomato surface instead of at
-        # an offset from the rigid-body origin.
-        surface_scale = torch.rsqrt(
-            torch.sum(torch.square(marker_directions / visual_radii), dim=-1)
-        )
-        marker_positions = visual_center + marker_directions * surface_scale.unsqueeze(-1)
-        print(
-            "[INFO]: Tomato visual bounds in rigid frame: "
-            f"center={visual_center.tolist()}, radii={visual_radii.tolist()}, "
-            f"marker_positions={marker_positions.tolist()}"
-        )
-
-        for rigid_prim_path in rigid_prim_paths:
-            for marker_index, marker_cfg in enumerate(marker_cfgs):
-                marker_prim_path = f"{rigid_prim_path}/VTDexOrientationMarker{marker_index}"
-                marker_prim = stage.GetPrimAtPath(marker_prim_path)
-                # Environments are USD clones. Creating the marker below the
-                # source environment can immediately propagate it to the other
-                # environments, so creation must be idempotent.
-                if not marker_prim.IsValid():
-                    marker_prim = marker_cfg.func(
-                        marker_prim_path,
-                        marker_cfg,
-                        translation=tuple(float(value) for value in marker_positions[marker_index]),
-                    )
-                if not marker_prim.IsValid():
-                    raise RuntimeError(
-                        "Failed to attach an orientation marker below the tomato rigid-body prim: "
-                        f"{rigid_prim_path}"
-                    )
 
     def _configure_vtdex_camera_pose(self):
         """Aim every tiled camera using environment-local eye/target points."""

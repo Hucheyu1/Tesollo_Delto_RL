@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+from pxr import UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
@@ -68,11 +69,20 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # Contact reporting must be enabled when the DG5F USD is spawned.
     robot_cfg = TESOLLO_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
-        spawn=TESOLLO_CFG.spawn.replace(activate_contact_sensors=True),
-        # This is the only actor-specific geometric adaptation. The whole
-        # source scene is shifted down by 0.29 m for the requested side camera,
-        # and the successful DG5F grasp layout is shifted with the object.
-        init_state=TESOLLO_CFG.init_state.replace(pos=(-0.11, 0.01733, 0.52)),
+        spawn=TESOLLO_CFG.spawn.replace(
+            activate_contact_sensors=True,
+            # The shared robot asset permits 1000 m/s depenetration for legacy
+            # tasks. That turns a small initial overlap into a several-hundred
+            # Newton contact spike in this 120 Hz table task.
+            rigid_props=TESOLLO_CFG.spawn.rigid_props.replace(max_depenetration_velocity=2.0),
+        ),
+        # Place DG5F above the tabletop object with its palm normal pointing
+        # straight down. The X offset keeps the open fingertips just outside
+        # the object before the absolute VTDex actions start closing the hand.
+        init_state=TESOLLO_CFG.init_state.replace(
+            pos=(-0.240, 0.01733, 0.442),
+            rot=(0.7071068, 0.0, 0.7071068, 0.0),
+        ),
     )
     vtdex_contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/rl_dg_[1-5]_[1-4]",
@@ -97,8 +107,11 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
                 disable_gravity=True,
             ),
             collision_props=sim_utils.CollisionPropertiesCfg(
-                contact_offset=0.002,
-                rest_offset=0.0,
+                # URDF collision meshes are instanced by Isaac's importer, so
+                # configure the contact envelope on the non-instanced table.
+                # The positive rest offset keeps rendered surfaces separated.
+                contact_offset=0.004,
+                rest_offset=0.001,
             ),
             physics_material=RigidBodyMaterialCfg(
                 static_friction=1.0,
@@ -122,13 +135,50 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.02, 0.35)),
     )
 
+    # Task-local DG5F pregrasp (radians), ordered layer-major as
+    # ``actuated_joint_names``. VTDexManip resets Shadow Hand to zero, which is
+    # already a useful open pose for that morphology. DG5F needs its thumb
+    # opposed and the four fingers half-flexed to put the object inside their
+    # reachable envelope. Keep this override local so the tomato task retains
+    # its independently trained initial pose.
+    hand_position = [
+        0.10, 0.00, 0.00, 0.00, 0.00,
+        -1.70, 0.90, 0.90, 0.90, 0.00,
+        0.70, 0.90, 0.90, 0.90, 1.00,
+        0.10, 0.90, 0.90, 0.90, 1.00,
+    ]
+    # Map Shadow Hand's useful actuator ranges onto the nearest DG5F joints.
+    # Four-finger abduction is about +/-20 degrees and flexion is 0..90
+    # degrees in the source MJCF. DG5F's asymmetric physical limits are
+    # respected (ring abduction +15, little abduction -15..+20), while its
+    # wider 109..115 degree proximal ranges are deliberately excluded because
+    # they curl the fingertips back toward the palm instead of around the
+    # tabletop object. Thumb opposition keeps the DG5F-specific -150..0 range.
+    hand_lower_limits = [
+        -22, -20, -20, -20, 0,
+        -150, 0, 0, 0, -15,
+        0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0,
+    ]
+    hand_upper_limits = [
+        60, 20, 20, 15, 45,
+        0, 90, 90, 90, 20,
+        90, 90, 90, 90, 90,
+        90, 90, 90, 90, 90,
+    ]
+    # DG5F's five silicone tip meshes are fixed visual children rather than
+    # tactile articulation bodies. They can lag behind moving links in rendered
+    # camera frames, so hide only those visuals; _4 link collisions and tactile
+    # observations remain enabled.
+    hide_dg5f_tip_visuals = True
+
     # A dedicated policy camera keeps the frozen encoder input independent of
     # the interactive viewer and supports the scene's batched regex prim path.
     vtdex_camera: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_.*/VTDexCamera",
         offset=CameraCfg.OffsetCfg(
             # An exact look-at pose is assigned after scene initialization.
-            pos=(0.11, 0.36, 0.36),
+            pos=(0.3, 0.3, 0.71),
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",
         ),
@@ -136,7 +186,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         spawn=sim_utils.PinholeCameraCfg(
             # Approximately the original Isaac Gym camera's 45 degree HFOV.
             focal_length=25.0,
-            focus_distance=0.36,
+            focus_distance=0.50,
             horizontal_aperture=20.955,
             clipping_range=(0.01, 2.0),
         ),
@@ -145,9 +195,10 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         update_latest_camera_pose=True,
         debug_vis=False,
     )
-    # Requested side view, aimed at the source object's translated center.
-    vtdex_camera_eye_local = (0.11, 0.36, 0.36)
-    vtdex_camera_target_local = (0.0, 0.02, 0.38)
+    # Exact source reorient_down camera after translating the full scene down
+    # by 0.29 m: source eye/target=(0.3,0.3,1.0)/(0,0,0.65).
+    vtdex_camera_eye_local = (0.3, 0.3, 0.71)
+    vtdex_camera_target_local = (0.0, 0.0, 0.36)
 
     # Original policy state is proprioception only. Shadow Hand's 48 values
     # become DG5F qpos(20) + qvel(20); RGB and 20 touch bits are fused by the
@@ -180,7 +231,10 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # fixed half turn about the table normal relative to that initial yaw.
     fix_object_initial_pose = True
     reset_position_noise = 0.01
-    reset_dof_pos_noise = 0.2
+    # Independent Shadow-Hand joint noise can put the shorter DG5F fingers
+    # inside an object before the first physics step. Object position/yaw still
+    # provide reset diversity, while the hand starts from its verified pregrasp.
+    reset_dof_pos_noise = 0.0
     reset_dof_vel_noise = 0.0
     target_yaw_delta_rad = 3.141592653589793
 
@@ -197,7 +251,9 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     vel_reward_scale = 1.0
     fingertip_distance_reward_scale = 0.25
     action_scale = 1.0
-    act_moving_average = 1.0
+    # Smooth position targets at 60 Hz. With 1.0, the first PPO action can move
+    # a DG5F joint by tens of degrees in a single control interval.
+    act_moving_average = 0.2
 
     # Keep the tiny source goal mesh visible exactly as in VTDexManip.
     debug_visualization = False
@@ -255,6 +311,7 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
             (self.num_envs, self.cfg.vtdex_embedding_dim), dtype=torch.float32, device=self.device
         )
         self._configure_vtdex_camera_pose()
+        self._hide_dg5f_tip_visuals()
         self._hide_goal_marker()
 
     def _setup_scene(self):
@@ -289,10 +346,14 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
             disable_gravity=False,
             enable_gyroscopic_forces=True,
             solver_position_iteration_count=8,
-            solver_velocity_iteration_count=0,
+            solver_velocity_iteration_count=4,
             sleep_threshold=0.005,
             stabilization_threshold=0.0025,
-            max_depenetration_velocity=1000.0,
+            # Keep overlap recovery bounded. The previous 1000 m/s setting was
+            # the main source of non-physical contact impulses.
+            max_depenetration_velocity=2.0,
+            max_linear_velocity=5.0,
+            max_angular_velocity=720.0,
         )
         goal_rigid_props = sim_utils.RigidBodyPropertiesCfg(
             kinematic_enabled=True,
@@ -362,6 +423,22 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         targets_w = self.scene.env_origins + target_local
         self._vtdex_camera.set_world_poses_from_view(eyes_w, targets_w)
 
+    def _hide_dg5f_tip_visuals(self):
+        """Hide DG5F's detached silicone visuals without changing physics."""
+
+        if not self.cfg.hide_dg5f_tip_visuals:
+            return
+        for env_path in self.scene.env_prim_paths:
+            for finger_index in range(1, 6):
+                visual_path = f"{env_path}/Robot/rl_dg_{finger_index}_tip/visuals"
+                visual_prim = self.scene.stage.GetPrimAtPath(visual_path)
+                if not visual_prim.IsValid():
+                    raise RuntimeError(
+                        f"Missing DG5F fingertip visual prim required by hide_dg5f_tip_visuals: "
+                        f"{visual_path}"
+                    )
+                UsdGeom.Imageable(visual_prim).MakeInvisible()
+
     def _get_observations(self) -> dict[str, torch.Tensor]:
         rgb = self._vtdex_camera.data.output["rgb"]
         tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
@@ -393,14 +470,18 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         return {"policy": policy_obs, "critic": critic_obs}
 
     def _pre_physics_step(self, actions: torch.Tensor) -> None:
-        """Map normalized actions to absolute DG5F joint targets."""
+        """Map normalized actions to absolute targets like VTDexManip."""
 
         self.raw_actions = torch.clamp(actions, -1.0, 1.0)
         self.actions = self.raw_actions.clone()
         lower = self.hand_dof_lower_limits[:, self.actuated_dof_indices]
         upper = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
-        absolute_targets = 0.5 * (self.raw_actions + 1.0) * (upper - lower) + lower
-        self.target_pos[:, self.actuated_dof_indices] = absolute_targets
+        scaled_actions = torch.clamp(
+            float(self.cfg.action_scale) * self.raw_actions, -1.0, 1.0
+        )
+        self.target_pos[:, self.actuated_dof_indices] = (
+            0.5 * (scaled_actions + 1.0) * (upper - lower) + lower
+        )
 
     def _table_task_metrics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return planar drift, rotation error, excessive tilt and table fall."""

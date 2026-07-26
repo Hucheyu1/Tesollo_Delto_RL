@@ -13,7 +13,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
 from isaaclab.envs import DirectRLEnv
 from isaaclab.markers import VisualizationMarkers, FRAME_MARKER_CFG
-from isaaclab.sensors import TiledCamera
+from isaaclab.sensors import Camera, ContactSensor, TiledCamera
 from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
 from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_angle_axis, quat_mul, sample_uniform, saturate
 
@@ -162,12 +162,19 @@ class TesolloDeltoRlEnv(DirectRLEnv):
             self.yolo_angle_calibrated = torch.full(
                 (self.num_envs,), configured_offset is not None, dtype=torch.bool, device=self.device
             )
+        if getattr(self.cfg, "enable_vtdex_collection_sensors", False):
+            self._initialize_vtdex_collection_sensors()
 
     def _setup_scene(self):
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
         if getattr(self.cfg, "use_yolo_student_obs", False):
             self._student_camera = TiledCamera(self.cfg.student_camera)
+        if getattr(self.cfg, "enable_vtdex_collection_sensors", False):
+            self._vtdex_collection_camera = Camera(self.cfg.vtdex_collection_camera)
+            self._vtdex_collection_contact_sensor = ContactSensor(
+                self.cfg.vtdex_collection_contact_sensor
+            )
 
         spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
 
@@ -177,6 +184,11 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.scene.rigid_objects["object"] = self.object
         if getattr(self.cfg, "use_yolo_student_obs", False):
             self.scene.sensors["student_camera"] = self._student_camera
+        if getattr(self.cfg, "enable_vtdex_collection_sensors", False):
+            self.scene.sensors["vtdex_collection_camera"] = self._vtdex_collection_camera
+            self.scene.sensors["vtdex_collection_contact"] = (
+                self._vtdex_collection_contact_sensor
+            )
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
@@ -366,9 +378,16 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.goal_pos[env_ids] = self.hand_base_pos[env_ids] + goal_marker_offset
 
         goal_pos_w = self.goal_pos + self.scene.env_origins
-        if getattr(self.cfg, "use_yolo_student_obs", False) and getattr(self.cfg, "hide_goal_marker_from_yolo", False):
-            # The marker uses the same tomato mesh and could be selected by
-            # YOLO as a second object. Keep it out of all student cameras.
+        hide_from_yolo = (
+            getattr(self.cfg, "use_yolo_student_obs", False)
+            and getattr(self.cfg, "hide_goal_marker_from_yolo", False)
+        )
+        hide_from_vtdex_collection = (
+            getattr(self.cfg, "enable_vtdex_collection_sensors", False)
+            and getattr(self.cfg, "hide_goal_marker_from_vtdex_collection", True)
+        )
+        if hide_from_yolo or hide_from_vtdex_collection:
+            # 目标 marker 使用同一个 tomato mesh，不能让它成为相机中的第二个物体。
             goal_pos_w = torch.full_like(goal_pos_w, -10.0)
         self.goal_markers.visualize(goal_pos_w, self.goal_rot)
 
@@ -389,6 +408,8 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         # 获取手指尖在世界坐标系中的速度
         self.fingertip_velocities = self.hand.data.body_vel_w[:, self.finger_bodies]
         self._compute_tactile_observations()
+        if getattr(self.cfg, "enable_vtdex_collection_sensors", False):
+            self._compute_vtdex_collection_tactile()
 
         # 获取手部关节位置和速度数据
         self.hand_dof_pos = self.hand.data.joint_pos
@@ -416,6 +437,87 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         self.fingertip_force_binary_results = (force_norms > self.cfg.contact_threshold).to(
             dtype=torch.int32
         )
+
+    def _initialize_vtdex_collection_sensors(self):
+        """校验 20 路采集触觉映射并设置与下游任务一致的相机视角。"""
+
+        body_ids, body_names = self._vtdex_collection_contact_sensor.find_bodies(
+            list(self.cfg.vtdex_collection_tactile_body_names), preserve_order=True
+        )
+        expected_names = list(self.cfg.vtdex_collection_tactile_body_names)
+        if body_names != expected_names:
+            raise RuntimeError(
+                "DG5F 预训练采集触觉顺序不一致: "
+                f"expected={expected_names}, resolved={body_names}"
+            )
+        if len(body_ids) != 20 or len(set(body_ids)) != 20:
+            raise RuntimeError(
+                "DG5F 预训练采集必须解析出 20 个唯一 link，"
+                f"实际 ids={body_ids}"
+            )
+        self._vtdex_collection_contact_body_ids = torch.tensor(
+            body_ids, dtype=torch.long, device=self.device
+        )
+        self.vtdex_collection_tactile_binary = torch.zeros(
+            (self.num_envs, 20), dtype=torch.uint8, device=self.device
+        )
+        self.vtdex_collection_tactile_force_norms = torch.zeros(
+            (self.num_envs, 20), dtype=torch.float32, device=self.device
+        )
+
+        eye_local = torch.tensor(
+            self.cfg.vtdex_collection_camera_eye_local,
+            dtype=torch.float32,
+            device=self.device,
+        ).view(1, 3)
+        target_local = torch.tensor(
+            self.cfg.vtdex_collection_camera_target_local,
+            dtype=torch.float32,
+            device=self.device,
+        ).view(1, 3)
+        if torch.linalg.vector_norm(eye_local - target_local).item() < 1.0e-4:
+            raise ValueError("预训练采集相机的 eye 和 target 不能相同")
+        self._vtdex_collection_camera.set_world_poses_from_view(
+            self.scene.env_origins + eye_local,
+            self.scene.env_origins + target_local,
+        )
+        if getattr(self.cfg, "vtdex_collection_show_tomato_markers", True):
+            from .vtdex_markers import spawn_tomato_orientation_markers
+
+            spawn_tomato_orientation_markers(
+                object_asset=self.object,
+                num_envs=self.num_envs,
+                marker_offsets=self.cfg.vtdex_collection_tomato_marker_offsets,
+                marker_radius=self.cfg.vtdex_collection_tomato_marker_radius,
+                diffuse_colors=self.cfg.vtdex_collection_tomato_marker_diffuse_colors,
+                emissive_colors=self.cfg.vtdex_collection_tomato_marker_emissive_colors,
+            )
+        print(f"[INFO] DG5F 预训练采集触觉顺序: {body_names}")
+
+    def _compute_vtdex_collection_tactile(self):
+        """更新仅用于离线预训练数据的 20 路触觉，不改变策略原始 10 路观测。"""
+
+        net_forces_w = self._vtdex_collection_contact_sensor.data.net_forces_w
+        expected_shape = (
+            self.num_envs,
+            self._vtdex_collection_contact_sensor.num_bodies,
+        )
+        if net_forces_w is None or net_forces_w.shape[:2] != expected_shape:
+            raise RuntimeError(
+                "DG5F 预训练采集 ContactSensor 张量尺寸异常: "
+                f"expected={expected_shape}, "
+                f"actual={None if net_forces_w is None else tuple(net_forces_w.shape)}"
+            )
+        tactile_forces = net_forces_w.index_select(
+            1, self._vtdex_collection_contact_body_ids
+        )
+        self.vtdex_collection_tactile_force_norms = torch.linalg.vector_norm(
+            tactile_forces, dim=-1
+        )
+        self.vtdex_collection_tactile_binary = (
+            self.vtdex_collection_tactile_force_norms
+            > float(self.cfg.vtdex_collection_contact_threshold)
+        ).to(dtype=torch.uint8)
 
     def compute_reduced_observations(self):
         if self.cfg.obs_type == "distill" and getattr(self.cfg, "use_yolo_student_obs", False):
@@ -506,30 +608,24 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         return estimate.position_image, angle_features
 
     def compute_full_observations(self):
-        obs = torch.cat(
-            (
-                # hand
-                unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
-                self.cfg.vel_obs_scale * self.hand_dof_vel,
-                # object
-                self.object_pos,
-                self.object_rot,
-                self.object_linvel,
-                self.cfg.vel_obs_scale * self.object_angvel,
-                # goal
-                self.in_hand_pos,
-                self.goal_rot,
-                quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
-                # fingertips
-                # self.fingertip_pos.view(self.num_envs, self.num_fingertips * 3),
-                # self.fingertip_rot.view(self.num_envs, self.num_fingertips * 4),
-                # self.fingertip_velocities.view(self.num_envs, self.num_fingertips * 6),
-                self.fingertip_force_binary_results, # 10
-                # actions
-                self.actions,
-            ),
-            dim=-1,
-        )
+        obs_parts = [
+            # hand
+            unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
+            self.cfg.vel_obs_scale * self.hand_dof_vel,
+            # object
+            self.object_pos,
+            self.object_rot,
+            self.object_linvel,
+            self.cfg.vel_obs_scale * self.object_angvel,
+            # goal
+            self.in_hand_pos,
+            self.goal_rot,
+            quat_mul(self.object_rot, quat_conjugate(self.goal_rot)),
+        ]
+        if getattr(self.cfg, "full_policy_include_tactile", True):
+            obs_parts.append(self.fingertip_force_binary_results)
+        obs_parts.append(self.actions)
+        obs = torch.cat(obs_parts, dim=-1)
         return obs
 
     def compute_full_state(self):

@@ -119,6 +119,9 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     state_space = 0
     asymmetric_obs = False
     obs_type = "full"
+    # 兼容早期 84 维 Direct 策略；默认仍包含新增的 10 路触觉（94 维）。
+    # 数据采集器会读取 checkpoint 首层尺寸并只在运行时自动切换。
+    full_policy_include_tactile = True
     action_scale = 0.1
     # 触觉二值化
     contact_threshold = 1

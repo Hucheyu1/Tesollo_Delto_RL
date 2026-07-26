@@ -18,6 +18,7 @@ EXTENSION_TOML_DATA = toml.load(os.path.join(EXTENSION_PATH, "config", "extensio
 # Minimum dependencies required prior to installation
 INSTALL_REQUIRES = [
     "einops",
+    "h5py",
     "numpy==1.26.0",
     "psutil",
     "transformers",

@@ -257,6 +257,18 @@ python scripts/rsl_rl/train.py \
   --num_envs 16 --headless
 ```
 
+### 用 DG5F 策略数据重新做 VT-JointPretrain
+
+项目现已包含一条不覆盖原任务和官方权重的完整流程：用
+`Tesollo-Delto-DG5F-Direct-v0` 的已训练策略采集 224×224 RGB 与 20 路
+DG5F link 接触，训练 VT-JointPretrain，再通过环境变量把新 encoder 接入
+`Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0`。
+
+采集时会强制关闭手、物体和目标的调试坐标轴，并默认隐藏目标番茄 mesh。
+相机、触觉顺序和番茄表面方向点与 Tomato 下游任务共用同一份常量，避免
+训练/使用时的输入协议漂移。详细命令、数据检查、训练、模型校验和切换方式见
+[DG5F VTDex 预训练说明](scripts/vtdex_pretraining/README.md)。
+
 Isaac Sim 5.1 的 `isaacsim-kernel` 要求 `numpy==1.26.0`；本项目的安装依赖已固定该版本。如果相机初始化出现
 `Unable to write from unknown dtype`，请确认当前激活环境不是 NumPy 2.x。
 
