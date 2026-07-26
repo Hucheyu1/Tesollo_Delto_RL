@@ -9,6 +9,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+
 from pxr import UsdGeom
 
 import isaaclab.sim as sim_utils
@@ -20,11 +21,10 @@ from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMater
 from isaaclab.utils import configclass
 from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform
 
+from .delto_cfg import TESOLLO_CFG
 from .tesollo_delto_rl_env import TesolloDeltoRlEnv, rotation_distance, unscale
 from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
-from .delto_cfg import TESOLLO_CFG
 from .vtdex_encoder import VTDexJointEncoder
-
 
 _VTDEx_ROOT = Path(__file__).resolve().parent / "vtdex_pretrained"
 _VTDEx_OBJECT_ROOT = _VTDEx_ROOT / "assets" / "reorient_up"
@@ -54,9 +54,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     episode_length_s = 10.0
     # The source task cycles through ten different objects, so environments
     # must own independent physics trees instead of cloning env_0.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(
-        num_envs=10, env_spacing=0.75, replicate_physics=False
-    )
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=0.75, replicate_physics=False)
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 120.0,
         render_interval=2,
@@ -81,7 +79,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         # palm rather than beyond the fingertips; the Z offset preserves a
         # collision-free gap for all ten source objects.
         init_state=TESOLLO_CFG.init_state.replace(
-            pos=(-0.080, 0.01733, 0.470),
+            pos=(-0.12, 0.022, 0.470),
             rot=(0.7071068, 0.0, 0.7071068, 0.0),
         ),
     )
@@ -144,10 +142,26 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # Keep this override local so the tomato task retains its independently
     # trained initial pose.
     hand_position = [
-        0.10, 0.00, 0.00, 0.00, 0.00,
-        -0.80, 0.30, 0.30, 0.30, 0.00,
-        -0.50, 0.30, 0.30, 0.30, 0.40,
-        0.00, 0.30, 0.30, 0.30, 0.40,
+        0.10,
+        0.00,
+        0.00,
+        0.00,
+        0.00,
+        -0.80,
+        0.30,
+        0.30,
+        0.30,
+        0.00,
+        -0.50,
+        0.30,
+        0.30,
+        0.30,
+        0.40,
+        0.00,
+        0.30,
+        0.30,
+        0.30,
+        0.40,
     ]
     # Map Shadow Hand's useful actuator ranges onto the nearest DG5F joints.
     # Four-finger abduction is about +/-20 degrees and flexion is 0..90
@@ -159,16 +173,48 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # its third joint retains the physical +/-90 degree range so the policy can
     # move from this open initial thumb into opposition.
     hand_lower_limits = [
-        -22, -20, -20, -20, 0,
-        -150, 0, 0, 0, -15,
-        -90, 0, 0, 0, 0,
-        0, 0, 0, 0, 0,
+        -22,
+        -20,
+        -20,
+        -20,
+        0,
+        -150,
+        0,
+        0,
+        0,
+        -15,
+        -90,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
     ]
     hand_upper_limits = [
-        60, 20, 20, 15, 45,
-        0, 90, 90, 90, 20,
-        90, 90, 90, 90, 90,
-        90, 90, 90, 90, 90,
+        60,
+        20,
+        20,
+        15,
+        45,
+        0,
+        90,
+        90,
+        90,
+        20,
+        90,
+        90,
+        90,
+        90,
+        90,
+        90,
+        90,
+        90,
+        90,
+        90,
     ]
     # DG5F's five silicone tip meshes are fixed visual children rather than
     # tactile articulation bodies. They can lag behind moving links in rendered
@@ -223,10 +269,26 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # proximal and knuckle. DG5F's thumb-base link proxies the final Shadow-Hand
     # palm token. Keep this exact 20-channel order in the real robot node.
     vtdex_tactile_body_names = (
-        "rl_dg_5_4", "rl_dg_4_4", "rl_dg_3_4", "rl_dg_2_4", "rl_dg_1_4",
-        "rl_dg_5_3", "rl_dg_4_3", "rl_dg_3_3", "rl_dg_2_3", "rl_dg_1_3",
-        "rl_dg_5_2", "rl_dg_4_2", "rl_dg_3_2", "rl_dg_2_2", "rl_dg_1_2",
-        "rl_dg_5_1", "rl_dg_4_1", "rl_dg_3_1", "rl_dg_2_1", "rl_dg_1_1",
+        "rl_dg_5_4",
+        "rl_dg_4_4",
+        "rl_dg_3_4",
+        "rl_dg_2_4",
+        "rl_dg_1_4",
+        "rl_dg_5_3",
+        "rl_dg_4_3",
+        "rl_dg_3_3",
+        "rl_dg_2_3",
+        "rl_dg_1_3",
+        "rl_dg_5_2",
+        "rl_dg_4_2",
+        "rl_dg_3_2",
+        "rl_dg_2_2",
+        "rl_dg_1_2",
+        "rl_dg_5_1",
+        "rl_dg_4_1",
+        "rl_dg_3_1",
+        "rl_dg_2_1",
+        "rl_dg_1_1",
     )
     fingertip_body_names = list(vtdex_tactile_body_names)
     vtdex_tactile_indices = tuple(range(20))
@@ -290,16 +352,10 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
             )
         if len(contact_body_ids) != 20 or len(set(contact_body_ids)) != 20:
             raise RuntimeError(
-                "VTDex ContactSensor must resolve exactly 20 unique DG5F links; "
-                f"got ids={contact_body_ids}"
+                f"VTDex ContactSensor must resolve exactly 20 unique DG5F links; got ids={contact_body_ids}"
             )
-        self._vtdex_contact_body_ids = torch.tensor(
-            contact_body_ids, dtype=torch.long, device=self.device
-        )
-        print(
-            "[INFO]: VTDex tactile ContactSensor mapping (net contact force): "
-            f"{contact_body_names}"
-        )
+        self._vtdex_contact_body_ids = torch.tensor(contact_body_ids, dtype=torch.long, device=self.device)
+        print(f"[INFO]: VTDex tactile ContactSensor mapping (net contact force): {contact_body_names}")
         self.vtdex_encoder = VTDexJointEncoder(
             repo_root=self.cfg.vtdex_repo_root,
             model_id=self.cfg.vtdex_model_id,
@@ -415,12 +471,10 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
     def _configure_vtdex_camera_pose(self):
         """Aim every tiled camera using environment-local eye/target points."""
 
-        eye_local = torch.tensor(
-            self.cfg.vtdex_camera_eye_local, dtype=torch.float32, device=self.device
-        ).view(1, 3)
-        target_local = torch.tensor(
-            self.cfg.vtdex_camera_target_local, dtype=torch.float32, device=self.device
-        ).view(1, 3)
+        eye_local = torch.tensor(self.cfg.vtdex_camera_eye_local, dtype=torch.float32, device=self.device).view(1, 3)
+        target_local = torch.tensor(self.cfg.vtdex_camera_target_local, dtype=torch.float32, device=self.device).view(
+            1, 3
+        )
         if torch.linalg.vector_norm(eye_local - target_local).item() < 1.0e-4:
             raise ValueError("vtdex_camera_eye_local and target must be different points")
         eyes_w = self.scene.env_origins + eye_local
@@ -438,8 +492,7 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
                 visual_prim = self.scene.stage.GetPrimAtPath(visual_path)
                 if not visual_prim.IsValid():
                     raise RuntimeError(
-                        f"Missing DG5F fingertip visual prim required by hide_dg5f_tip_visuals: "
-                        f"{visual_path}"
+                        f"Missing DG5F fingertip visual prim required by hide_dg5f_tip_visuals: {visual_path}"
                     )
                 UsdGeom.Imageable(visual_prim).MakeInvisible()
 
@@ -480,26 +533,18 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         self.actions = self.raw_actions.clone()
         lower = self.hand_dof_lower_limits[:, self.actuated_dof_indices]
         upper = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
-        scaled_actions = torch.clamp(
-            float(self.cfg.action_scale) * self.raw_actions, -1.0, 1.0
-        )
-        self.target_pos[:, self.actuated_dof_indices] = (
-            0.5 * (scaled_actions + 1.0) * (upper - lower) + lower
-        )
+        scaled_actions = torch.clamp(float(self.cfg.action_scale) * self.raw_actions, -1.0, 1.0)
+        self.target_pos[:, self.actuated_dof_indices] = 0.5 * (scaled_actions + 1.0) * (upper - lower) + lower
 
     def _table_task_metrics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """Return planar drift, rotation error, excessive tilt and table fall."""
 
-        planar_drift = torch.linalg.vector_norm(
-            self.object_pos[:, :2] - self.in_hand_pos[:, :2], dim=-1
-        )
+        planar_drift = torch.linalg.vector_norm(self.object_pos[:, :2] - self.in_hand_pos[:, :2], dim=-1)
         rotation_error = rotation_distance(self.object_rot, self.goal_rot)
         object_up = quat_apply(self.object_rot, self.z_unit_tensor)
         tilt_cosine = object_up[:, 2]
         tilt_limit_cosine = torch.cos(
-            torch.deg2rad(
-                torch.tensor(float(self.cfg.table_tilt_limit_deg), device=self.device)
-            )
+            torch.deg2rad(torch.tensor(float(self.cfg.table_tilt_limit_deg), device=self.device))
         )
         excessive_tilt = tilt_cosine <= tilt_limit_cosine
         below_table = self.object_pos[:, 2] < float(self.cfg.table_top_z) - 0.025
@@ -511,22 +556,12 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         planar_drift, rotation_error, excessive_tilt, below_table = self._table_task_metrics()
         fingertip_pos_w = self.hand.data.body_pos_w.index_select(1, self._reward_fingertip_body_ids)
         fingertip_z = fingertip_pos_w[:, :, 2] - self.scene.env_origins[:, 2:3]
-        fingertip_height_error = torch.abs(
-            fingertip_z - self.object_pos[:, 2:3]
-        ).sum(dim=-1)
+        fingertip_height_error = torch.abs(fingertip_z - self.object_pos[:, 2:3]).sum(dim=-1)
 
         distance_reward = planar_drift * float(self.cfg.dist_reward_scale)
-        rotation_reward = float(self.cfg.rot_reward_scale) / (
-            torch.abs(rotation_error) + float(self.cfg.rot_eps)
-        )
-        velocity_reward = (
-            torch.clamp(self.object_angvel[:, 2], -10.0, 10.0)
-            * float(self.cfg.vel_reward_scale)
-        )
-        fingertip_reward = (
-            torch.exp(-10.0 * fingertip_height_error)
-            * float(self.cfg.fingertip_distance_reward_scale)
-        )
+        rotation_reward = float(self.cfg.rot_reward_scale) / (torch.abs(rotation_error) + float(self.cfg.rot_eps))
+        velocity_reward = torch.clamp(self.object_angvel[:, 2], -10.0, 10.0) * float(self.cfg.vel_reward_scale)
+        fingertip_reward = torch.exp(-10.0 * fingertip_height_error) * float(self.cfg.fingertip_distance_reward_scale)
         action_penalty = torch.sum(torch.square(self.actions), dim=-1)
         reward = (
             distance_reward
@@ -558,11 +593,7 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         self._compute_intermediate_values()
         planar_drift, rotation_error, excessive_tilt, below_table = self._table_task_metrics()
         success = rotation_error <= float(self.cfg.success_tolerance)
-        failed = (
-            (planar_drift >= float(self.cfg.fall_dist))
-            | excessive_tilt
-            | below_table
-        )
+        failed = (planar_drift >= float(self.cfg.fall_dist)) | excessive_tilt | below_table
         terminated = success | failed
         time_out = self.episode_length_buf >= self.max_episode_length - 1
         return terminated, time_out
@@ -585,9 +616,9 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         tactile_forces_w = net_forces_w.index_select(1, self._vtdex_contact_body_ids)
         tactile_force_norms = torch.linalg.vector_norm(tactile_forces_w, dim=-1)
         self.fingertip_force_sensors = tactile_forces_w
-        self.fingertip_force_binary_results = (
-            tactile_force_norms > float(self.cfg.vtdex_contact_threshold)
-        ).to(dtype=torch.int32)
+        self.fingertip_force_binary_results = (tactile_force_norms > float(self.cfg.vtdex_contact_threshold)).to(
+            dtype=torch.int32
+        )
         if hasattr(self, "extras"):
             self.extras.setdefault("log", {})["vtdex_tactile_active_ratio"] = (
                 self.fingertip_force_binary_results.float().mean()
