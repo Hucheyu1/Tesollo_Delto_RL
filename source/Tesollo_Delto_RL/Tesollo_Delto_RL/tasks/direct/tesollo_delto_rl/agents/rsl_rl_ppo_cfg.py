@@ -16,6 +16,19 @@ from isaaclab_rl.rsl_rl import (
 
 
 @configclass
+class RslRlVTDexActorModelCfg(RslRlMLPModelCfg):
+    """Separate DG5F proprioception and VTDex CLS projection configuration."""
+
+    class_name = (
+        "Tesollo_Delto_RL.tasks.direct.tesollo_delto_rl.vtdex_policy:"
+        "VTDexActorModel"
+    )
+    proprioception_dim = 40
+    vtdex_embedding_dim = 384
+    projection_dim = 128
+
+
+@configclass
 class TesolloDeltoPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 16
     max_iterations = 10000
@@ -136,19 +149,63 @@ class TesolloDeltoVisionFFPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 @configclass
 class TesolloDeltoVTDexPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Asymmetric PPO for frozen VTDex visual-tactile observations."""
+    """Asymmetric PPO for the VTDex reorient_down reproduction."""
+
+    num_steps_per_env = 32
+    max_iterations = 5100
+    save_interval = 250
+    experiment_name = "TesolloDelto_vtdex"
+    obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+    actor = RslRlVTDexActorModelCfg(
+        hidden_dims=[1024, 1024, 512],
+        activation="elu",
+        obs_normalization=False,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
+            init_std=0.8,
+        ),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[1024, 1024, 512],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=None,
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.0,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.96,
+        lam=0.95,
+        desired_kl=0.016,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
+class TesolloDeltoVTDexTomatoPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Preserved PPO configuration for the 471-D VTDex tomato task."""
 
     num_steps_per_env = 32
     max_iterations = 10000
     save_interval = 250
-    experiment_name = "TesolloDelto_vtdex"
-    policy = RslRlPpoActorCriticCfg(
-        init_noise_std=0.8,
-        actor_obs_normalization=True,
-        critic_obs_normalization=True,
-        actor_hidden_dims=[1024, 1024, 512],
-        critic_hidden_dims=[1024, 1024, 512],
+    experiment_name = "TesolloDelto_vtdex_tomato"
+    obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[1024, 1024, 512],
         activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.8),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[1024, 1024, 512],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=None,
     )
     algorithm = RslRlPpoAlgorithmCfg(
         value_loss_coef=1.0,

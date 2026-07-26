@@ -86,6 +86,37 @@ gym.register(
 
 gym.register(
     id="Tesollo-Delto-DG5F-VTDex-Direct-v0",
+    entry_point=f"{__name__}.tesollo_delto_vtdex_tomato_env:TesolloDeltoVTDexTomatoEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.tesollo_delto_vtdex_tomato_env:TesolloDeltoVTDexTomatoEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexTomatoPPORunnerCfg"
+        ),
+    },
+)
+
+# Explicit name for the preserved tomato task. The shorter ID above remains a
+# compatibility alias for old tomato checkpoints and launch scripts.
+gym.register(
+    id="Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0",
+    entry_point=f"{__name__}.tesollo_delto_vtdex_tomato_env:TesolloDeltoVTDexTomatoEnv",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.tesollo_delto_vtdex_tomato_env:TesolloDeltoVTDexTomatoEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexTomatoPPORunnerCfg"
+        ),
+    },
+)
+
+# Strict VTDexManip reorient_down scene with the Shadow Hand replaced by DG5F.
+gym.register(
+    id="Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0",
     entry_point=f"{__name__}.tesollo_delto_vtdex_env:TesolloDeltoVTDexEnv",
     disable_env_checker=True,
     kwargs={

@@ -1,0 +1,2 @@
+recursive-include Tesollo_Delto_RL/tasks *.py *.yaml *.json *.pt *.usd *.urdf *.obj *.md
+include Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/vtdex_pretrained/LICENSE

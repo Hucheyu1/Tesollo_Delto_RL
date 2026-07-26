@@ -38,6 +38,13 @@ parser.add_argument(
     metavar="STEPS",
     help="Also save the VTDex policy RGB input every N simulation steps (0 disables it).",
 )
+parser.add_argument(
+    "--max_steps",
+    type=int,
+    default=0,
+    metavar="STEPS",
+    help="Stop cleanly after this many simulation steps (0 runs until the simulator closes).",
+)
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
@@ -45,11 +52,13 @@ args_cli = parser.parse_args()
 
 if args_cli.save_camera_every < 0:
     parser.error("--save_camera_every must be non-negative")
+if args_cli.max_steps < 0:
+    parser.error("--max_steps must be non-negative")
 if args_cli.save_camera_every > 0 and args_cli.save_camera_frame is None:
     parser.error("--save_camera_every requires --save_camera_frame PATH")
 
-# TiledCamera rendering must be enabled before Isaac Sim is launched, including
-# for a headless one-frame capture.
+# Camera rendering must be enabled before Isaac Sim is launched, including for
+# a headless one-frame capture.
 if (
     args_cli.camera_view
     or args_cli.save_camera_frame is not None
@@ -152,13 +161,15 @@ def main():
             if camera_output_path is not None and args_cli.save_camera_every > 0:
                 if step % args_cli.save_camera_every == 0:
                     _save_vtdex_camera_frame(env, camera_output_path, step=step)
+            if args_cli.max_steps > 0 and step >= args_cli.max_steps:
+                break
 
     # close the simulator
     env.close()
 
 
 if __name__ == "__main__":
-    # run the main function
-    main()
-    # close sim app
-    simulation_app.close()
+    try:
+        main()
+    finally:
+        simulation_app.close()

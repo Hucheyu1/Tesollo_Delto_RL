@@ -11,6 +11,9 @@
 - OpenAI 风格观测维度为 `47`，critic state 维度为 `84`。
 - 蒸馏任务基于普通环境动力学，student observation 为 `47`，teacher observation 为 `84`。
 - 视觉环境配置位于 `tasks/direct/tesollo_delto_rl/tesollo_delto_rl_vision_env.py`，policy observation 为 `118`，critic state 为 `111`。
+- VTDexManip 桌面重定向环境使用项目内置的
+  `vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210` 权重，policy observation 为 `424`，critic state 为
+  `104`。
 - Gym 任务注册入口已整理到 `tasks/direct/tesollo_delto_rl/__init__.py`，任务名前缀为 `Tesollo-Delto-DG5F`。
 
 ## 已注册任务
@@ -23,6 +26,10 @@
 | `Tesollo-Delto-DG5F-OpenAI-LSTM-Direct-v0` | `TesolloDeltoRlEnv` | `TesolloDeltoRlOpenAIEnvCfg` |
 | `Tesollo-Delto-DG5F-Vision-Direct-v0` | `TesolloDeltoRlVisionEnv` | `TesolloDeltoRlVisionEnvCfg` |
 | `Tesollo-Delto-DG5F-Vision-Direct-Play-v0` | `TesolloDeltoRlVisionEnv` | `TesolloDeltoRlVisionEnvPlayCfg` |
+| `Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0` | `TesolloDeltoVTDexTomatoEnv` | `TesolloDeltoVTDexTomatoEnvCfg` |
+| `Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0` | `TesolloDeltoVTDexEnv` | `TesolloDeltoVTDexEnvCfg` |
+
+`Tesollo-Delto-DG5F-VTDex-Direct-v0` 保留为原番茄任务的兼容别名。
 
 ## 环境要求
 
@@ -69,6 +76,10 @@ Tesollo_Delto_RL/
         ├── tesollo_delto_rl_env.py
         ├── tesollo_delto_rl_env_cfg.py
         ├── tesollo_delto_rl_vision_env.py
+        ├── tesollo_delto_vtdex_env.py
+        ├── vtdex_encoder.py
+        ├── vtdex_policy.py
+        ├── vtdex_pretrained/
         ├── yolo_seg_image_estimator.py
         ├── foundationpose_estimator.py
         ├── feature_extractor.py
@@ -86,6 +97,11 @@ Tesollo_Delto_RL/
 | `tesollo_delto_rl_vision_env.py` | 带相机和 CNN feature extractor 的视觉版本环境。 |
 | `yolo_seg_image_estimator.py` | 批量 YOLO-seg 二维中心、主轴角度与遮挡时序跟踪，用于蒸馏 student observation。 |
 | `foundationpose_estimator.py` | FoundationPose + RGB-D + mask 的物体 6D 位姿估计封装，用于仿真到真机迁移实验。 |
+| `tesollo_delto_vtdex_env.py` | VTDexManip `reorient_down-vt_all_cls` 到 Isaac Lab + DG5F 的桌面重定向适配。 |
+| `tesollo_delto_vtdex_tomato_env.py` | 独立保留的 DG5F 番茄位姿调整任务，使用 471 维 VTDex policy observation。 |
+| `vtdex_encoder.py` | 冻结的 VTDex RGB + 20 路二值触觉联合编码器封装。 |
+| `vtdex_policy.py` | 对齐上游 `ActorCriticVTEncoder` 的 40→128 本体状态分支和 384→128 VTDex CLS 分支。 |
+| `vtdex_pretrained/` | 已复制到本项目的 VTDex 模型、checkpoint、参考配置及 `reorient_down` 的 10 类 COACD 物体资产。 |
 | `agents/rsl_rl_ppo_cfg.py` | RSL-RL PPO、distillation runner、policy 和算法参数。 |
 | `agents/rl_games_ppo_cfg.yaml` | RL-Games PPO 配置。 |
 | `robots/dg5f_right.usd` | DG5F 右手机器人主 USD。 |
@@ -173,6 +189,76 @@ python scripts/rl_games/train.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 
 ```
 
 蒸馏、OpenAI 风格观测或视觉任务可将 `--task` 替换为上表中的对应任务名。
+
+## VTDexManip 桌面物体位姿调整
+
+该环境复现 VTDexManip 的 `reorient_down-vt_all_cls` 任务语义，同时将 Shadow Hand 替换为 DG5F 右手：
+
+- 环境按上游顺序循环使用 apple、Rubik's cube、colored wood blocks、doorknob、potted meat can、cups、
+  toy airplane、rubber duck、plum 和 master chef can；主物体/目标物体尺度分别为 `0.05`/`0.005`，颜色和
+  `0.8` 物体摩擦系数也与上游一致。
+- 桌面尺寸保持上游的 `1×1×0.6 m`。为使用户指定的侧视机位不落入原坐标系的桌体，整套场景统一下移
+  `0.29 m`：桌面顶面、物体和目标 z 分别为 `0.31/0.38/0.35 m`，三者的相对几何与上游
+  `0.60/0.67/0.64 m` 完全一致。
+- VTDex policy camera 使用 `224×224`、约 45° HFOV，环境局部 eye 为 `(0.11, 0.36, 0.36)`，
+  look-at 为 `(0.0, 0.02, 0.38)`，从侧面正对物体和 DG5F 指尖。
+- 物体在桌面上以随机 yaw 重置，目标是相对初始姿态绕桌面法向旋转 180°。
+- 策略以 60 Hz 输出 20 维绝对关节位置动作。
+- actor 输入为 DG5F 关节位置 20 维、关节速度 20 维和冻结的 VTDex CLS 特征 384 维；前两者与 CLS
+  分别投影为 128 维后再进入控制 MLP，与上游 `ActorCriticVTEncoder` 的融合拓扑一致。仿真物体位姿仅供
+  critic、奖励与终止条件使用。
+- VTDex 的 20 路二值触觉按“小指、无名指、中指、食指、拇指”的顺序，从末端、中节、近节到根部映射到 DG5F 20 个 link。
+- 奖励保留上游任务的平面位置、姿态、物体 Z 角速度、指尖高度、动作惩罚和成功奖励；成功、平面漂移过大、倾倒、离开桌面或 600 步超时会结束 episode。
+
+指定 checkpoint 作为冻结的视觉—触觉表征初始化使用。由于 Shadow Hand 与 DG5F 的运动学、关节限制和动作含义不同，
+下游 PPO actor/critic 必须在 DG5F 环境中重新训练，不能直接复用 Shadow Hand 的控制策略权重。
+
+先做单环境相机与接触 smoke test：
+
+```bash
+python scripts/zero_agent.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0 \
+  --num_envs 1 --headless --max_steps 10 \
+  --save_camera_frame outputs/vtdex_reorient_down_camera.png
+```
+
+训练：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0 \
+  --num_envs 10 --headless
+```
+
+播放 checkpoint：
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0 \
+  --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT>
+```
+
+预训练 checkpoint 较大且由 Git LFS 管理。克隆项目后若该文件仍是 LFS pointer，需要执行 `git lfs pull`。首次训练建议从
+10 个环境开始，以覆盖一轮完整物体集合；扩大规模时建议使用 10 的倍数。
+
+### 保留的番茄 VTDex 任务
+
+之前的番茄位姿调整代码已独立保存在 `tesollo_delto_vtdex_tomato_env.py`，没有被十物体场景覆盖。该任务继续使用
+`robots/tomato.usd`、两个表面方向点、随机目标位置/旋转和 471 维 actor observation。旧任务名和显式任务名均可使用：
+
+```bash
+python scripts/zero_agent.py \
+  --task Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0 \
+  --num_envs 1 --headless --max_steps 10 \
+  --save_camera_frame outputs/vtdex_tomato_camera.png
+
+python scripts/rsl_rl/train.py \
+  --task Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0 \
+  --num_envs 16 --headless
+```
+
+Isaac Sim 5.1 的 `isaacsim-kernel` 要求 `numpy==1.26.0`；本项目的安装依赖已固定该版本。如果相机初始化出现
+`Unable to write from unknown dtype`，请确认当前激活环境不是 NumPy 2.x。
 
 ## FoundationPose 视觉流程
 

@@ -1,40 +1,78 @@
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Deployment-oriented tomato reorientation using VTDexManip features."""
+"""VTDexManip table reorientation task adapted to the DG5F right hand."""
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+from pathlib import Path
 
 import torch
-from pxr import Usd, UsdGeom
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import Articulation, RigidObject
+from isaaclab.assets import Articulation, RigidObject, RigidObjectCfg
 from isaaclab.scene import InteractiveSceneCfg
-from isaaclab.sensors import ContactSensor, ContactSensorCfg, TiledCamera, TiledCameraCfg
-from isaaclab.sim.spawners.from_files import GroundPlaneCfg, spawn_ground_plane
+from isaaclab.sensors import Camera, CameraCfg, ContactSensor, ContactSensorCfg
+from isaaclab.sim import SimulationCfg
+from isaaclab.sim.spawners.materials.physics_materials_cfg import RigidBodyMaterialCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.math import quat_apply, quat_conjugate, quat_from_angle_axis, quat_mul
+from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, sample_uniform
 
-from .tesollo_delto_rl_env import TesolloDeltoRlEnv, unscale
+from .tesollo_delto_rl_env import TesolloDeltoRlEnv, rotation_distance, unscale
 from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
 from .delto_cfg import TESOLLO_CFG
 from .vtdex_encoder import VTDexJointEncoder
 
 
+_VTDEx_ROOT = Path(__file__).resolve().parent / "vtdex_pretrained"
+_VTDEx_OBJECT_ROOT = _VTDEx_ROOT / "assets" / "reorient_up"
+_VTDEx_OBJECT_CODES = (
+    "ddg-ycb_013_apple",
+    "ddg-ycb_077_rubiks_cube",
+    "ddg-ycb_070-a_colored_wood_blocks",
+    "grab-doorknob",
+    "ddg-ycb_010_potted_meat_can",
+    "ddg-ycb_065-a_cups",
+    "ddg-ycb_072-a_toy_airplane",
+    "ddg-gd_rubber_duck_poisson_001",
+    "ddg-ycb_018_plum",
+    "ddg-ycb_002_master_chef_can",
+)
+_BASE_ENV_CFG = TesolloDeltoRlEnvCfg()
+
+
 @configclass
 class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
-    """VTDex observation task with privileged simulator state only for critic/reward."""
+    """DG5F reproduction of VTDexManip's ``reorient_down-vt_all_cls`` task."""
 
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=16, env_spacing=2.0, replicate_physics=True)
+    # VTDexManip advances its policy at 60 Hz for a maximum of 600 steps.
+    # Isaac Lab runs two 120 Hz physics steps per policy action to retain a
+    # useful contact solve rate while matching the original control frequency.
+    decimation = 2
+    episode_length_s = 10.0
+    # The source task cycles through ten different objects, so environments
+    # must own independent physics trees instead of cloning env_0.
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(
+        num_envs=10, env_spacing=0.75, replicate_physics=False
+    )
+    sim: SimulationCfg = SimulationCfg(
+        dt=1.0 / 120.0,
+        render_interval=2,
+        # VTDex explicitly assigns 0.8 friction to every manipulated-object
+        # collision shape. The table below overrides this default to 1.0.
+        physics_material=RigidBodyMaterialCfg(static_friction=0.8, dynamic_friction=0.8),
+    )
 
     # VTDex uses net rigid-body contact forces, not articulation joint forces.
     # Contact reporting must be enabled when the DG5F USD is spawned.
     robot_cfg = TESOLLO_CFG.replace(
         prim_path="/World/envs/env_.*/Robot",
         spawn=TESOLLO_CFG.spawn.replace(activate_contact_sensors=True),
+        # This is the only actor-specific geometric adaptation. The whole
+        # source scene is shifted down by 0.29 m for the requested side camera,
+        # and the successful DG5F grasp layout is shifted with the object.
+        init_state=TESOLLO_CFG.init_state.replace(pos=(-0.11, 0.01733, 0.52)),
     )
     vtdex_contact_sensor: ContactSensorCfg = ContactSensorCfg(
         prim_path="/World/envs/env_.*/Robot/rl_dg_[1-5]_[1-4]",
@@ -46,9 +84,49 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # Match reorient_up/down's binary tactile threshold (Newtons).
     vtdex_contact_threshold = 0.01
 
-    vtdex_camera: TiledCameraCfg = TiledCameraCfg(
+    # Exact VTDexManip reorient_down geometry in a globally translated frame:
+    # source table top/object/goal z = 0.60/0.67/0.64 m; here they are
+    # 0.31/0.38/0.35 m. All relative offsets and dimensions are unchanged.
+    table_top_z = 0.31
+    table_cfg = _BASE_ENV_CFG.object_cfg.replace(
+        prim_path="/World/envs/env_.*/Table",
+        spawn=sim_utils.CuboidCfg(
+            size=(1.0, 1.0, 0.60),
+            rigid_props=sim_utils.RigidBodyPropertiesCfg(
+                kinematic_enabled=True,
+                disable_gravity=True,
+            ),
+            collision_props=sim_utils.CollisionPropertiesCfg(
+                contact_offset=0.002,
+                rest_offset=0.0,
+            ),
+            physics_material=RigidBodyMaterialCfg(
+                static_friction=1.0,
+                dynamic_friction=1.0,
+                restitution=0.0,
+            ),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.5, 0.5, 0.5)),
+        ),
+        init_state=_BASE_ENV_CFG.object_cfg.init_state.replace(pos=(0.0, 0.0, 0.01)),
+    )
+    # These assets are spawned per environment in _setup_scene so the exact
+    # ten-object source distribution can be retained.
+    object_cfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/Object",
+        spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.02, 0.38)),
+    )
+    goal_vtdex_object_cfg = RigidObjectCfg(
+        prim_path="/World/envs/env_.*/GoalObject",
+        spawn=None,
+        init_state=RigidObjectCfg.InitialStateCfg(pos=(0.0, 0.02, 0.35)),
+    )
+
+    # A dedicated policy camera keeps the frozen encoder input independent of
+    # the interactive viewer and supports the scene's batched regex prim path.
+    vtdex_camera: CameraCfg = CameraCfg(
         prim_path="/World/envs/env_.*/VTDexCamera",
-        offset=TiledCameraCfg.OffsetCfg(
+        offset=CameraCfg.OffsetCfg(
             # An exact look-at pose is assigned after scene initialization.
             pos=(0.11, 0.36, 0.36),
             rot=(1.0, 0.0, 0.0, 0.0),
@@ -56,50 +134,33 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         ),
         data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
-            focal_length=18.0,
-            focus_distance=0.45,
+            # Approximately the original Isaac Gym camera's 45 degree HFOV.
+            focal_length=25.0,
+            focus_distance=0.36,
             horizontal_aperture=20.955,
-            clipping_range=(0.01, 1.5),
+            clipping_range=(0.01, 2.0),
         ),
         width=224,
         height=224,
         update_latest_camera_pose=True,
         debug_vis=False,
     )
-    # Environment-local eye and look-at point. The camera sits on the +Y side
-    # and looks strictly along -Y at the nominal tomato center.
+    # Requested side view, aimed at the source object's translated center.
     vtdex_camera_eye_local = (0.11, 0.36, 0.36)
-    vtdex_camera_target_local = (0.11, 0.00267, 0.36)
+    vtdex_camera_target_local = (0.0, 0.02, 0.38)
 
-    # Two non-collinear colored dots make the otherwise near-spherical tomato
-    # orientation observable. They are visual-only and must be reproduced on
-    # the real tomato at the same object-local offsets.
-    show_tomato_orientation_markers = True
-    # Both markers lie on the +Y hemisphere so that the -Y-facing camera can
-    # observe them, while their non-collinear offsets still disambiguate pose.
-    tomato_orientation_marker_offsets = ((0.018, 0.028, 0.010), (-0.018, 0.028, -0.010))
-    # Keep marker settings as plain Hydra-safe values. Nested config objects in
-    # a tuple are converted to dictionaries during Hydra's round trip.
-    tomato_orientation_marker_radius = 0.005
-    tomato_orientation_marker_diffuse_colors = (
-        (0.02, 0.25, 1.0),
-        (1.0, 0.85, 0.02),
-    )
-    tomato_orientation_marker_emissive_colors = (
-        (0.0, 0.02, 0.15),
-        (0.12, 0.08, 0.0),
-    )
-
-    # actor = qpos(20) + qvel(20) + target position in hand frame(3)
-    #       + target quaternion in hand frame(4) + binary tactile(20)
-    #       + previous action(20) + frozen VTDex CLS feature(384) = 471
-    observation_space = 471
+    # Original policy state is proprioception only. Shadow Hand's 48 values
+    # become DG5F qpos(20) + qvel(20); RGB and 20 touch bits are fused by the
+    # frozen joint encoder into one 384-D CLS representation.
+    observation_space = 424
     # critic keeps the 84-dimensional simulator state plus 20 tactile values.
     state_space = 104
     asymmetric_obs = True
     obs_type = "vtdex"
 
-    vtdex_repo_root = "/home/agiuser/Visual_tactile/VTDexManip"
+    # Self-contained copy under this project; no external VTDexManip checkout
+    # is needed at training or deployment time.
+    vtdex_repo_root = str(_VTDEx_ROOT)
     vtdex_model_id = "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210"
     vtdex_embedding_dim = 384
     # Match VTDex's layer-major token semantics: five fingers ordered
@@ -115,72 +176,49 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     fingertip_body_names = list(vtdex_tactile_body_names)
     vtdex_tactile_indices = tuple(range(20))
 
-    # Sample a reachable target position around the nominal in-hand point in
-    # the hand-root frame. Orientation continues to use the base task's random
-    # full-pose target sampling.
-    randomize_goal_position = True
-    goal_position_delta_range = ((-0.015, 0.015), (-0.015, 0.015), (-0.015, 0.015))
-    use_fixed_goal_local_pos = False
-    fixed_goal_local_pos = (0.0, 0.0, 0.0)
-    # "all" samples full SO(3); "x", "y" or "z" restricts targets to one
-    # rotation axis expressed in the hand-root frame. Keep this string-typed so
-    # Isaac Lab's Hydra config updater can accept command-line axis overrides.
-    goal_rotation_axis = "all"
-    goal_rotation_angle_range = (-3.141592653589793, 3.141592653589793)
-    require_position_for_success = True
-    position_success_tolerance = 0.025
+    # reorient_down resets the object with random table yaw and commands a
+    # fixed half turn about the table normal relative to that initial yaw.
+    fix_object_initial_pose = True
+    reset_position_noise = 0.01
+    reset_dof_pos_noise = 0.2
+    reset_dof_vel_noise = 0.0
+    target_yaw_delta_rad = 3.141592653589793
 
-    # The goal tomato must never enter the policy camera; only the real tomato
-    # is encoded. Debug coordinate frames still use the true target pose.
+    # Reward and termination values copied from reorient_down.yaml.
+    dist_reward_scale = -10.0
+    rot_reward_scale = 1.0
+    rot_eps = 0.1
+    action_penalty_scale = -0.0002
+    reach_goal_bonus = 250.0
+    fall_penalty = 0.0
+    fall_dist = 0.05
+    success_tolerance = 0.1
+    table_tilt_limit_deg = 45.0
+    vel_reward_scale = 1.0
+    fingertip_distance_reward_scale = 0.25
+    action_scale = 1.0
+    act_moving_average = 1.0
+
+    # Keep the tiny source goal mesh visible exactly as in VTDexManip.
     debug_visualization = False
 
 
 class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
-    """Actor observes VTDex features, never the simulator tomato pose."""
+    """Tabletop half-turn task whose actor never receives simulator object pose."""
 
     cfg: TesolloDeltoVTDexEnvCfg
 
     def __init__(self, cfg: TesolloDeltoVTDexEnvCfg, render_mode: str | None = None, **kwargs):
-        goal_rotation_axis = str(cfg.goal_rotation_axis).lower()
-        if goal_rotation_axis in {"all", "none", "full"}:
-            goal_rotation_axis = None
-        elif goal_rotation_axis not in {"x", "y", "z"}:
-            raise ValueError(
-                'goal_rotation_axis must be one of "all", "x", "y", "z"; '
-                f"got {cfg.goal_rotation_axis}"
-            )
-        goal_rotation_angle_range = tuple(float(angle) for angle in cfg.goal_rotation_angle_range)
-        if len(goal_rotation_angle_range) != 2 or goal_rotation_angle_range[0] > goal_rotation_angle_range[1]:
-            raise ValueError(
-                "goal_rotation_angle_range must be an ordered (min, max) pair, "
-                f"got {cfg.goal_rotation_angle_range}"
-            )
-
-        goal_position_ranges = tuple(
-            tuple(float(bound) for bound in axis_range) for axis_range in cfg.goal_position_delta_range
-        )
-        if len(goal_position_ranges) != 3 or any(len(axis_range) != 2 for axis_range in goal_position_ranges):
-            raise ValueError(
-                "goal_position_delta_range must contain three (min, max) pairs, "
-                f"got {cfg.goal_position_delta_range}"
-            )
-        if any(axis_range[0] > axis_range[1] for axis_range in goal_position_ranges):
-            raise ValueError(
-                "goal_position_delta_range bounds must be ordered, "
-                f"got {cfg.goal_position_delta_range}"
-            )
-        fixed_goal_local_pos = tuple(float(value) for value in cfg.fixed_goal_local_pos)
-        if len(fixed_goal_local_pos) != 3:
-            raise ValueError(
-                "fixed_goal_local_pos must contain exactly three values, "
-                f"got {cfg.fixed_goal_local_pos}"
-            )
+        if float(cfg.target_yaw_delta_rad) == 0.0:
+            raise ValueError("target_yaw_delta_rad must be non-zero")
+        if not 0.0 < float(cfg.table_tilt_limit_deg) < 90.0:
+            raise ValueError("table_tilt_limit_deg must be between 0 and 90 degrees")
 
         super().__init__(cfg, render_mode, **kwargs)
-        self._goal_rotation_axis = goal_rotation_axis
-        self._goal_rotation_angle_range = goal_rotation_angle_range
-        self._goal_position_ranges = torch.tensor(
-            goal_position_ranges, dtype=torch.float32, device=self.device
+        self._reward_fingertip_body_ids = torch.tensor(
+            [self.hand.body_names.index(name) for name in self.cfg.vtdex_tactile_body_names[:5]],
+            dtype=torch.long,
+            device=self.device,
         )
         contact_body_ids, contact_body_names = self._vtdex_contact_sensor.find_bodies(
             list(self.cfg.vtdex_tactile_body_names), preserve_order=True
@@ -202,7 +240,6 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
             "[INFO]: VTDex tactile ContactSensor mapping (net contact force): "
             f"{contact_body_names}"
         )
-        self._spawn_tomato_orientation_markers()
         self.vtdex_encoder = VTDexJointEncoder(
             repo_root=self.cfg.vtdex_repo_root,
             model_id=self.cfg.vtdex_model_id,
@@ -221,122 +258,94 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         self._hide_goal_marker()
 
     def _setup_scene(self):
+        self._spawn_vtdex_objects()
         self.hand = Articulation(self.cfg.robot_cfg)
         self.object = RigidObject(self.cfg.object_cfg)
-        self._vtdex_camera = TiledCamera(self.cfg.vtdex_camera)
+        self.goal_object = RigidObject(self.cfg.goal_vtdex_object_cfg)
+        self.table = RigidObject(self.cfg.table_cfg)
+        self._vtdex_camera = Camera(self.cfg.vtdex_camera)
         self._vtdex_contact_sensor = ContactSensor(self.cfg.vtdex_contact_sensor)
 
-        spawn_ground_plane(prim_path="/World/ground", cfg=GroundPlaneCfg())
-        self.scene.clone_environments(copy_from_source=False)
         self.scene.articulations["robot"] = self.hand
         self.scene.rigid_objects["object"] = self.object
+        self.scene.rigid_objects["goal_object"] = self.goal_object
+        self.scene.rigid_objects["table"] = self.table
         self.scene.sensors["vtdex_camera"] = self._vtdex_camera
         self.scene.sensors["vtdex_contact"] = self._vtdex_contact_sensor
 
         light_cfg = sim_utils.DomeLightCfg(intensity=2000.0, color=(0.75, 0.75, 0.75))
         light_cfg.func("/World/Light", light_cfg)
 
-    def _spawn_tomato_orientation_markers(self):
-        """Attach dots to the visual surface of the actual tomato rigid prim."""
+    def _spawn_vtdex_objects(self):
+        """Spawn the source task's heterogeneous active and goal URDFs."""
 
-        if not self.cfg.show_tomato_orientation_markers:
-            return
+        yellow = sim_utils.PreviewSurfaceCfg(
+            diffuse_color=(204.0 / 255.0, 204.0 / 255.0, 0.0),
+            roughness=0.5,
+            metallic=0.0,
+        )
+        active_rigid_props = sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=False,
+            disable_gravity=False,
+            enable_gyroscopic_forces=True,
+            solver_position_iteration_count=8,
+            solver_velocity_iteration_count=0,
+            sleep_threshold=0.005,
+            stabilization_threshold=0.0025,
+            max_depenetration_velocity=1000.0,
+        )
+        goal_rigid_props = sim_utils.RigidBodyPropertiesCfg(
+            kinematic_enabled=True,
+            disable_gravity=True,
+        )
+        for env_index, env_path in enumerate(self.scene.env_prim_paths):
+            object_code = _VTDEx_OBJECT_CODES[env_index % len(_VTDEx_OBJECT_CODES)]
+            urdf_path = _VTDEx_OBJECT_ROOT / object_code / "coacd" / "coacd_1.urdf"
+            # Derived from coacd_1.urdf by removing only <collision> elements.
+            # This reproduces Isaac Gym's separate goal collision group without
+            # relying on collision-property edits below instanced mesh prims.
+            goal_urdf_path = _VTDEx_OBJECT_ROOT / object_code / "coacd" / "coacd_goal.urdf"
+            if not urdf_path.is_file():
+                raise FileNotFoundError(f"Missing copied VTDex object asset: {urdf_path}")
+            if not goal_urdf_path.is_file():
+                raise FileNotFoundError(f"Missing derived VTDex goal asset: {goal_urdf_path}")
 
-        marker_offsets = tuple(
-            tuple(float(value) for value in offset)
-            for offset in self.cfg.tomato_orientation_marker_offsets
-        )
-        diffuse_colors = tuple(
-            tuple(float(value) for value in color)
-            for color in self.cfg.tomato_orientation_marker_diffuse_colors
-        )
-        emissive_colors = tuple(
-            tuple(float(value) for value in color)
-            for color in self.cfg.tomato_orientation_marker_emissive_colors
-        )
-        if not (
-            len(marker_offsets) == len(diffuse_colors) == len(emissive_colors) == 2
-            and all(len(values) == 3 for values in marker_offsets + diffuse_colors + emissive_colors)
-        ):
-            raise ValueError(
-                "Tomato orientation markers require two 3-D offsets, diffuse colors, and emissive colors"
+            common = {
+                "fix_base": False,
+                "merge_fixed_joints": True,
+                "joint_drive": None,
+                "collider_type": "convex_hull",
+                "visual_material": yellow,
+                # Collision overrides must reach the imported mesh prims:
+                # active objects collide, while the tiny goal actors do not.
+                "make_instanceable": False,
+            }
+            object_spawn_cfg = sim_utils.UrdfFileCfg(
+                **common,
+                asset_path=str(urdf_path),
+                scale=(0.05, 0.05, 0.05),
+                semantic_tags=[("class", "object")],
+                rigid_props=active_rigid_props,
             )
-        marker_radius = float(self.cfg.tomato_orientation_marker_radius)
-        if marker_radius <= 0.0:
-            raise ValueError("tomato_orientation_marker_radius must be positive")
-        marker_directions = torch.tensor(marker_offsets, dtype=torch.float64)
-        if not torch.isfinite(marker_directions).all() or (
-            torch.linalg.vector_norm(marker_directions, dim=-1) <= 1.0e-8
-        ).any():
-            raise ValueError("Tomato orientation marker offsets must be finite, non-zero directions")
-        marker_cfgs = tuple(
-            sim_utils.SphereCfg(
-                radius=marker_radius,
-                visual_material=sim_utils.PreviewSurfaceCfg(
-                    diffuse_color=diffuse_color,
-                    emissive_color=emissive_color,
-                ),
+            goal_spawn_cfg = sim_utils.UrdfFileCfg(
+                **common,
+                asset_path=str(goal_urdf_path),
+                scale=(0.005, 0.005, 0.005),
+                semantic_tags=[("class", "goal")],
+                rigid_props=goal_rigid_props,
             )
-            for diffuse_color, emissive_color in zip(diffuse_colors, emissive_colors, strict=True)
-        )
-
-        rigid_prim_paths = tuple(str(path) for path in self.object.root_physx_view.prim_paths)
-        if len(rigid_prim_paths) != self.num_envs:
-            raise RuntimeError(
-                "Expected one tomato rigid-body prim per environment, got "
-                f"{len(rigid_prim_paths)} for {self.num_envs} environments"
+            object_spawn_cfg.func(
+                f"{env_path}/Object",
+                object_spawn_cfg,
+                translation=tuple(self.cfg.object_cfg.init_state.pos),
+                orientation=tuple(self.cfg.object_cfg.init_state.rot),
             )
-
-        stage = sim_utils.get_current_stage()
-        rigid_prim = stage.GetPrimAtPath(rigid_prim_paths[0])
-        bbox_cache = UsdGeom.BBoxCache(
-            Usd.TimeCode.Default(), [UsdGeom.Tokens.default_, UsdGeom.Tokens.render]
-        )
-        local_range = bbox_cache.ComputeLocalBound(rigid_prim).ComputeAlignedRange()
-        if local_range.IsEmpty():
-            raise RuntimeError(f"Cannot compute tomato visual bounds below {rigid_prim_paths[0]}")
-
-        bounds_min = torch.tensor(tuple(local_range.GetMin()), dtype=torch.float64)
-        bounds_max = torch.tensor(tuple(local_range.GetMax()), dtype=torch.float64)
-        visual_center = 0.5 * (bounds_min + bounds_max)
-        visual_radii = 0.5 * (bounds_max - bounds_min)
-        if not torch.isfinite(visual_radii).all() or (visual_radii <= 1.0e-5).any():
-            raise RuntimeError(
-                f"Invalid tomato visual bounds: min={bounds_min.tolist()}, max={bounds_max.tolist()}"
+            goal_spawn_cfg.func(
+                f"{env_path}/GoalObject",
+                goal_spawn_cfg,
+                translation=tuple(self.cfg.goal_vtdex_object_cfg.init_state.pos),
+                orientation=tuple(self.cfg.goal_vtdex_object_cfg.init_state.rot),
             )
-
-        # Configured values define two non-collinear directions on the +Y
-        # hemisphere. Intersect each ray with an ellipsoid fitted to the visual
-        # bounds so the sphere centers sit on the tomato surface instead of at
-        # an offset from the rigid-body origin.
-        surface_scale = torch.rsqrt(
-            torch.sum(torch.square(marker_directions / visual_radii), dim=-1)
-        )
-        marker_positions = visual_center + marker_directions * surface_scale.unsqueeze(-1)
-        print(
-            "[INFO]: Tomato visual bounds in rigid frame: "
-            f"center={visual_center.tolist()}, radii={visual_radii.tolist()}, "
-            f"marker_positions={marker_positions.tolist()}"
-        )
-
-        for rigid_prim_path in rigid_prim_paths:
-            for marker_index, marker_cfg in enumerate(marker_cfgs):
-                marker_prim_path = f"{rigid_prim_path}/VTDexOrientationMarker{marker_index}"
-                marker_prim = stage.GetPrimAtPath(marker_prim_path)
-                # Environments are USD clones. Creating the marker below the
-                # source environment can immediately propagate it to the other
-                # environments, so creation must be idempotent.
-                if not marker_prim.IsValid():
-                    marker_prim = marker_cfg.func(
-                        marker_prim_path,
-                        marker_cfg,
-                        translation=tuple(float(value) for value in marker_positions[marker_index]),
-                    )
-                if not marker_prim.IsValid():
-                    raise RuntimeError(
-                        "Failed to attach an orientation marker below the tomato rigid-body prim: "
-                        f"{rigid_prim_path}"
-                    )
 
     def _configure_vtdex_camera_pose(self):
         """Aim every tiled camera using environment-local eye/target points."""
@@ -358,19 +367,12 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
         self.vtdex_embeddings = self.vtdex_encoder(rgb, tactile)
 
-        target_pos_hand = quat_apply(
-            quat_conjugate(self.hand_base_rot),
-            self.in_hand_pos - self.hand_base_pos,
-        )
-        target_rot_hand = quat_mul(quat_conjugate(self.hand_base_rot), self.goal_rot)
+        # Match reorient_down's policy boundary: only hand proprioception and
+        # the frozen joint RGB/touch representation are exposed to the actor.
         policy_obs = torch.cat(
             (
                 unscale(self.hand_dof_pos, self.hand_dof_lower_limits, self.hand_dof_upper_limits),
                 self.cfg.vel_obs_scale * self.hand_dof_vel,
-                target_pos_hand,
-                target_rot_hand,
-                tactile,
-                self.actions,
                 self.vtdex_embeddings,
             ),
             dim=-1,
@@ -389,6 +391,96 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
                 f"configuration declares {self.cfg.state_space}"
             )
         return {"policy": policy_obs, "critic": critic_obs}
+
+    def _pre_physics_step(self, actions: torch.Tensor) -> None:
+        """Map normalized actions to absolute DG5F joint targets."""
+
+        self.raw_actions = torch.clamp(actions, -1.0, 1.0)
+        self.actions = self.raw_actions.clone()
+        lower = self.hand_dof_lower_limits[:, self.actuated_dof_indices]
+        upper = self.hand_dof_upper_limits[:, self.actuated_dof_indices]
+        absolute_targets = 0.5 * (self.raw_actions + 1.0) * (upper - lower) + lower
+        self.target_pos[:, self.actuated_dof_indices] = absolute_targets
+
+    def _table_task_metrics(self) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return planar drift, rotation error, excessive tilt and table fall."""
+
+        planar_drift = torch.linalg.vector_norm(
+            self.object_pos[:, :2] - self.in_hand_pos[:, :2], dim=-1
+        )
+        rotation_error = rotation_distance(self.object_rot, self.goal_rot)
+        object_up = quat_apply(self.object_rot, self.z_unit_tensor)
+        tilt_cosine = object_up[:, 2]
+        tilt_limit_cosine = torch.cos(
+            torch.deg2rad(
+                torch.tensor(float(self.cfg.table_tilt_limit_deg), device=self.device)
+            )
+        )
+        excessive_tilt = tilt_cosine <= tilt_limit_cosine
+        below_table = self.object_pos[:, 2] < float(self.cfg.table_top_z) - 0.025
+        return planar_drift, rotation_error, excessive_tilt, below_table
+
+    def _get_rewards(self) -> torch.Tensor:
+        """Reproduce reorient_down's rotation, velocity and fingertip shaping."""
+
+        planar_drift, rotation_error, excessive_tilt, below_table = self._table_task_metrics()
+        fingertip_pos_w = self.hand.data.body_pos_w.index_select(1, self._reward_fingertip_body_ids)
+        fingertip_z = fingertip_pos_w[:, :, 2] - self.scene.env_origins[:, 2:3]
+        fingertip_height_error = torch.abs(
+            fingertip_z - self.object_pos[:, 2:3]
+        ).sum(dim=-1)
+
+        distance_reward = planar_drift * float(self.cfg.dist_reward_scale)
+        rotation_reward = float(self.cfg.rot_reward_scale) / (
+            torch.abs(rotation_error) + float(self.cfg.rot_eps)
+        )
+        velocity_reward = (
+            torch.clamp(self.object_angvel[:, 2], -10.0, 10.0)
+            * float(self.cfg.vel_reward_scale)
+        )
+        fingertip_reward = (
+            torch.exp(-10.0 * fingertip_height_error)
+            * float(self.cfg.fingertip_distance_reward_scale)
+        )
+        action_penalty = torch.sum(torch.square(self.actions), dim=-1)
+        reward = (
+            distance_reward
+            + rotation_reward
+            + velocity_reward
+            + fingertip_reward
+            + action_penalty * float(self.cfg.action_penalty_scale)
+        )
+
+        success = rotation_error <= float(self.cfg.success_tolerance)
+        displaced = planar_drift >= float(self.cfg.fall_dist)
+        failed = displaced | excessive_tilt | below_table
+        reward = torch.where(success, reward + float(self.cfg.reach_goal_bonus), reward)
+        reward = torch.where(failed, reward + float(self.cfg.fall_penalty), reward)
+
+        self.reset_goal_buf[:] = success
+        self.successes[:] = torch.where(success, torch.ones_like(self.successes), self.successes)
+        self.extras.setdefault("log", {}).update(
+            {
+                "table_rotation_error_rad": rotation_error.mean(),
+                "table_planar_drift_m": planar_drift.mean(),
+                "table_success_rate": success.float().mean(),
+                "table_tilt_failure_rate": excessive_tilt.float().mean(),
+            }
+        )
+        return reward
+
+    def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
+        self._compute_intermediate_values()
+        planar_drift, rotation_error, excessive_tilt, below_table = self._table_task_metrics()
+        success = rotation_error <= float(self.cfg.success_tolerance)
+        failed = (
+            (planar_drift >= float(self.cfg.fall_dist))
+            | excessive_tilt
+            | below_table
+        )
+        terminated = success | failed
+        time_out = self.episode_length_buf >= self.max_episode_length - 1
+        return terminated, time_out
 
     def _compute_tactile_observations(self):
         """Use VTDex-compatible net contact forces for the 20 tactile bits."""
@@ -419,38 +511,77 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
             self.extras["log"]["vtdex_tactile_force_max_n"] = tactile_force_norms.max()
 
     def _reset_target_pose(self, env_ids: Sequence[int]):
-        super()._reset_target_pose(env_ids)
-
-        if self._goal_rotation_axis is not None:
-            axis_tensor = getattr(self, f"{self._goal_rotation_axis}_unit_tensor")[env_ids]
-            angle_min, angle_max = self._goal_rotation_angle_range
-            goal_angles = angle_min + torch.rand(len(env_ids), device=self.device) * (angle_max - angle_min)
-            goal_rot_local = quat_from_angle_axis(goal_angles, axis_tensor)
-            self.goal_rot[env_ids] = quat_mul(self.hand_base_rot[env_ids], goal_rot_local)
-
-        if self.cfg.use_fixed_goal_local_pos:
-            goal_local_pos = torch.tensor(
-                self.cfg.fixed_goal_local_pos, dtype=torch.float32, device=self.device
-            ).view(1, 3).repeat(len(env_ids), 1)
-        elif getattr(self.cfg, "randomize_goal_position", False):
-            random_unit = torch.rand((len(env_ids), 3), dtype=torch.float32, device=self.device)
-            delta = self._goal_position_ranges[:, 0] + random_unit * (
-                self._goal_position_ranges[:, 1] - self._goal_position_ranges[:, 0]
-            )
-            goal_local_pos = self.in_hand_local_pos[env_ids] + delta
-        else:
-            # ``_reset_idx`` has just placed this target at the initial object
-            # position. On subsequent goal resets, retain the same position and
-            # only resample orientation.
-            self.goal_pos[env_ids] = self.in_hand_pos[env_ids]
-            self._hide_goal_marker()
-            return
-
-        self.in_hand_pos[env_ids] = self.hand_base_pos[env_ids] + quat_apply(
-            self.hand_base_rot[env_ids], goal_local_pos
+        object_rot = self.object.data.root_quat_w[env_ids]
+        target_delta = quat_from_angle_axis(
+            torch.full(
+                (len(env_ids),),
+                float(self.cfg.target_yaw_delta_rad),
+                dtype=torch.float32,
+                device=self.device,
+            ),
+            self.z_unit_tensor[env_ids],
         )
+        self.goal_rot[env_ids] = quat_mul(object_rot, target_delta)
+        self.in_hand_pos[env_ids] = self.object.data.root_pos_w[env_ids] - self.scene.env_origins[env_ids]
         self.goal_pos[env_ids] = self.in_hand_pos[env_ids]
+        self.goal_pos[env_ids, 2] -= 0.03
+        self.reset_goal_buf[env_ids] = False
+        self._write_goal_object_pose(env_ids)
         self._hide_goal_marker()
+
+    def _reset_idx(self, env_ids: Sequence[int] | None):
+        """Reset on-table position/yaw after the shared DG5F state reset."""
+
+        if env_ids is None:
+            env_ids = self.hand._ALL_INDICES  # type: ignore
+        super()._reset_idx(env_ids)
+
+        object_root_state = self.object.data.default_root_state[env_ids].clone()
+        xy_noise = sample_uniform(
+            -float(self.cfg.reset_position_noise),
+            float(self.cfg.reset_position_noise),
+            (len(env_ids), 2),
+            device=self.device,
+        )
+        object_root_state[:, :2] += xy_noise
+        yaw = sample_uniform(
+            -torch.pi,
+            torch.pi,
+            (len(env_ids),),
+            device=self.device,
+        )
+        yaw_rotation = quat_from_angle_axis(yaw, self.z_unit_tensor[env_ids])
+        object_root_state[:, 3:7] = quat_mul(object_root_state[:, 3:7], yaw_rotation)
+        object_root_state[:, :3] += self.scene.env_origins[env_ids]
+        object_root_state[:, 7:] = 0.0
+        self.object.write_root_pose_to_sim(object_root_state[:, :7], env_ids)
+        self.object.write_root_velocity_to_sim(object_root_state[:, 7:], env_ids)
+
+        object_pos_env = object_root_state[:, :3] - self.scene.env_origins[env_ids]
+        self.in_hand_pos[env_ids] = object_pos_env
+        self.goal_pos[env_ids] = object_pos_env
+        self.goal_pos[env_ids, 2] -= 0.03
+        target_delta = quat_from_angle_axis(
+            torch.full(
+                (len(env_ids),),
+                float(self.cfg.target_yaw_delta_rad),
+                dtype=torch.float32,
+                device=self.device,
+            ),
+            self.z_unit_tensor[env_ids],
+        )
+        self.goal_rot[env_ids] = quat_mul(object_root_state[:, 3:7], target_delta)
+        self.reset_goal_buf[env_ids] = False
+        self._write_goal_object_pose(env_ids)
+        self._hide_goal_marker()
+        self._compute_intermediate_values()
+
+    def _write_goal_object_pose(self, env_ids: Sequence[int]):
+        """Move the tiny non-colliding goal actor to the current target pose."""
+
+        goal_pos_w = self.goal_pos[env_ids] + self.scene.env_origins[env_ids]
+        goal_pose_w = torch.cat((goal_pos_w, self.goal_rot[env_ids]), dim=-1)
+        self.goal_object.write_root_pose_to_sim(goal_pose_w, env_ids)
 
     def _hide_goal_marker(self):
         hidden_goal_pos_w = torch.full_like(self.goal_pos, -10.0)
