@@ -91,8 +91,10 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
-# Visual distillation requires RTX camera rendering even without video output.
-if args_cli.video or (args_cli.task is not None and "Distill" in args_cli.task):
+# Visual tasks require RTX camera rendering even without video output.
+if args_cli.video or (
+    args_cli.task is not None and any(tag in args_cli.task for tag in ("Distill", "VTDex"))
+):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra
@@ -156,14 +158,20 @@ def _configure_video_camera_view(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg 
     camera_cfg = getattr(env_cfg, "student_camera", None)
     if camera_cfg is None:
         camera_cfg = getattr(env_cfg, "tiled_camera", None)
+    if camera_cfg is None:
+        camera_cfg = getattr(env_cfg, "vtdex_camera", None)
     if camera_cfg is None or not hasattr(camera_cfg, "offset"):
         print("[INFO] --video_view camera requested, but this task has no student/tiled camera cfg. Keeping viewer pose.")
         return
 
-    camera_pos = _as_tuple3(camera_cfg.offset.pos)
-    object_cfg = getattr(env_cfg, "object_cfg", None)
-    object_init_state = getattr(object_cfg, "init_state", None)
-    camera_lookat = _as_tuple3(getattr(object_init_state, "pos", (0.10, 0.0, 0.50)))
+    if hasattr(env_cfg, "vtdex_camera_eye_local"):
+        camera_pos = _as_tuple3(env_cfg.vtdex_camera_eye_local)
+        camera_lookat = _as_tuple3(env_cfg.vtdex_camera_target_local)
+    else:
+        camera_pos = _as_tuple3(camera_cfg.offset.pos)
+        object_cfg = getattr(env_cfg, "object_cfg", None)
+        object_init_state = getattr(object_cfg, "init_state", None)
+        camera_lookat = _as_tuple3(getattr(object_init_state, "pos", (0.10, 0.0, 0.50)))
 
     env_cfg.viewer.origin_type = "env"
     env_cfg.viewer.env_index = 0

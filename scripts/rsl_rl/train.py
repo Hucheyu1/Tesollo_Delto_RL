@@ -40,8 +40,10 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 
-# Visual distillation requires RTX camera rendering even without video output.
-if args_cli.video or (args_cli.task is not None and "Distill" in args_cli.task):
+# Visual tasks require RTX camera rendering even without video output.
+if args_cli.video or (
+    args_cli.task is not None and any(tag in args_cli.task for tag in ("Distill", "VTDex"))
+):
     args_cli.enable_cameras = True
 
 # clear out sys.argv for Hydra

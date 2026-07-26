@@ -259,6 +259,8 @@ class TesolloDeltoRlEnv(DirectRLEnv):
             self.cfg.av_factor,                     # 平均值因子
             bool(getattr(self.cfg, "y_axis_only", False)),
             self.hand_base_rot,
+            bool(getattr(self.cfg, "require_position_for_success", False)),
+            float(getattr(self.cfg, "position_success_tolerance", 0.03)),
         )
         # 初始化extras中的log字典
         if "log" not in self.extras:
@@ -386,12 +388,7 @@ class TesolloDeltoRlEnv(DirectRLEnv):
         )
         # 获取手指尖在世界坐标系中的速度
         self.fingertip_velocities = self.hand.data.body_vel_w[:, self.finger_bodies]
-        # 计算手指body的力传感器数据
-        self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[
-                :, self.finger_bodies
-            ]
-        force_norms = torch.norm(self.fingertip_force_sensors[:,:,:3], dim=2)
-        self.fingertip_force_binary_results = (force_norms > self.cfg.contact_threshold).int() 
+        self._compute_tactile_observations()
 
         # 获取手部关节位置和速度数据
         self.hand_dof_pos = self.hand.data.joint_pos
@@ -408,6 +405,17 @@ class TesolloDeltoRlEnv(DirectRLEnv):
 
         # 显示调试坐标系
         self._visualize_debug_frames()
+
+    def _compute_tactile_observations(self):
+        """Populate the task's force and binary tactile buffers."""
+
+        self.fingertip_force_sensors = self.hand.root_physx_view.get_link_incoming_joint_force()[
+            :, self.finger_bodies
+        ]
+        force_norms = torch.linalg.vector_norm(self.fingertip_force_sensors[:, :, :3], dim=-1)
+        self.fingertip_force_binary_results = (force_norms > self.cfg.contact_threshold).to(
+            dtype=torch.int32
+        )
 
     def compute_reduced_observations(self):
         if self.cfg.obs_type == "distill" and getattr(self.cfg, "use_yolo_student_obs", False):
@@ -819,6 +827,8 @@ def compute_rewards(
     av_factor: float,
     y_axis_only: bool,
     rotation_reference: torch.Tensor,
+    require_position_for_success: bool,
+    position_success_tolerance: float,
 ):
     # 计算物体到目标的距离和旋转差异
     goal_dist = torch.norm(object_pos - target_pos, p=2, dim=-1)
@@ -834,8 +844,11 @@ def compute_rewards(
     # 综合奖励计算
     reward = dist_rew + rot_rew + action_penalty * action_penalty_scale
     # 判断是否达成目标并更新目标重置标志
+    goal_reached = torch.abs(rot_dist) <= success_tolerance
+    if require_position_for_success:
+        goal_reached = torch.logical_and(goal_reached, goal_dist <= position_success_tolerance)
     goal_resets = torch.where(
-        torch.abs(rot_dist) <= success_tolerance,
+        goal_reached,
         torch.ones_like(reset_goal_buf),
         reset_goal_buf,
     )

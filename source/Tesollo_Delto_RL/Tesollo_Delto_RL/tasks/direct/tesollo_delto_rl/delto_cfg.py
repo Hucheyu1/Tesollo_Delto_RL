@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
 from isaaclab.assets import ArticulationCfg
 
+
+_ROBOT_USD = str(Path(__file__).resolve().parent / "robots" / "dg5f_right.usd")
+
+
 TESOLLO_CFG = ArticulationCfg(
     # prim_path = "/World/envs/env_.*/Robot",
     spawn=sim_utils.UsdFileCfg(
-        usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/dg5f_right.usd",
+        usd_path=_ROBOT_USD,
         activate_contact_sensors=False,
         # 刚体属性
         rigid_props=sim_utils.RigidBodyPropertiesCfg(

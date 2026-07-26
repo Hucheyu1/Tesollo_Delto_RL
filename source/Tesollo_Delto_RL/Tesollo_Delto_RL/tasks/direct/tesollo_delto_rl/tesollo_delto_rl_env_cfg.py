@@ -1,6 +1,8 @@
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
+from pathlib import Path
+
 import isaaclab.envs.mdp as mdp
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, RigidObjectCfg
@@ -16,6 +18,9 @@ from isaaclab.utils import configclass
 from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg
 
 from .delto_cfg import TESOLLO_CFG
+
+
+_TOMATO_USD = str(Path(__file__).resolve().parent / "robots" / "tomato.usd")
 
 
 @configclass
@@ -199,7 +204,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     object_cfg: RigidObjectCfg = RigidObjectCfg(
         prim_path="/World/envs/env_.*/object",
         spawn=sim_utils.UsdFileCfg(
-            usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+            usd_path=_TOMATO_USD,
             semantic_tags=[("class", "tomato")],
             rigid_props=sim_utils.RigidBodyPropertiesCfg(
                 kinematic_enabled=False,
@@ -257,6 +262,9 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
     fall_dist = 0.20  # 掉落距离阈值
     vel_obs_scale = 0.2  # 速度观测缩放因子
     success_tolerance = 0.1  # 成功容忍度
+    # 默认保持旧任务“姿态到达即成功”的行为；需要同时控制位置的任务可打开此开关。
+    require_position_for_success = False
+    position_success_tolerance = 0.03
     max_consecutive_success = 0  # 最大连续成功次数
     av_factor = 0.1  # 平均因子
     act_moving_average = 1.0  # 动作移动平均因子
@@ -266,7 +274,7 @@ class TesolloDeltoRlEnvCfg(DirectRLEnvCfg):
         prim_path="/Visuals/goal_marker",
         markers={
             "goal": sim_utils.UsdFileCfg(
-                usd_path="/root/gpufree-data/Tesollo_Delto_RL/source/Tesollo_Delto_RL/Tesollo_Delto_RL/tasks/direct/tesollo_delto_rl/robots/tomato.usd",
+                usd_path=_TOMATO_USD,
                 scale=(1.0, 1.0, 1.0),
             )
         },
