@@ -76,11 +76,12 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
             # Newton contact spike in this 120 Hz table task.
             rigid_props=TESOLLO_CFG.spawn.rigid_props.replace(max_depenetration_velocity=2.0),
         ),
-        # Place DG5F above the tabletop object with its palm normal pointing
-        # straight down. The X offset keeps the open fingertips just outside
-        # the object before the absolute VTDex actions start closing the hand.
+        # Place DG5F directly above the tabletop object with its palm normal
+        # pointing straight down. The X alignment puts the object below the
+        # palm rather than beyond the fingertips; the Z offset preserves a
+        # collision-free gap for all ten source objects.
         init_state=TESOLLO_CFG.init_state.replace(
-            pos=(-0.240, 0.01733, 0.442),
+            pos=(-0.080, 0.01733, 0.470),
             rot=(0.7071068, 0.0, 0.7071068, 0.0),
         ),
     )
@@ -137,15 +138,16 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
 
     # Task-local DG5F pregrasp (radians), ordered layer-major as
     # ``actuated_joint_names``. VTDexManip resets Shadow Hand to zero, which is
-    # already a useful open pose for that morphology. DG5F needs its thumb
-    # opposed and the four fingers half-flexed to put the object inside their
-    # reachable envelope. Keep this override local so the tomato task retains
-    # its independently trained initial pose.
+    # already a useful open pose for that morphology. Here DG5F starts with a
+    # lightly opened thumb and only 0.3 rad of four-finger flexion: the object
+    # remains visibly below the palm while all fingers retain room to close.
+    # Keep this override local so the tomato task retains its independently
+    # trained initial pose.
     hand_position = [
         0.10, 0.00, 0.00, 0.00, 0.00,
-        -1.70, 0.90, 0.90, 0.90, 0.00,
-        0.70, 0.90, 0.90, 0.90, 1.00,
-        0.10, 0.90, 0.90, 0.90, 1.00,
+        -0.80, 0.30, 0.30, 0.30, 0.00,
+        -0.50, 0.30, 0.30, 0.30, 0.40,
+        0.00, 0.30, 0.30, 0.30, 0.40,
     ]
     # Map Shadow Hand's useful actuator ranges onto the nearest DG5F joints.
     # Four-finger abduction is about +/-20 degrees and flexion is 0..90
@@ -153,11 +155,13 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     # respected (ring abduction +15, little abduction -15..+20), while its
     # wider 109..115 degree proximal ranges are deliberately excluded because
     # they curl the fingertips back toward the palm instead of around the
-    # tabletop object. Thumb opposition keeps the DG5F-specific -150..0 range.
+    # tabletop object. Thumb opposition keeps the DG5F-specific -150..0 range;
+    # its third joint retains the physical +/-90 degree range so the policy can
+    # move from this open initial thumb into opposition.
     hand_lower_limits = [
         -22, -20, -20, -20, 0,
         -150, 0, 0, 0, -15,
-        0, 0, 0, 0, 0,
+        -90, 0, 0, 0, 0,
         0, 0, 0, 0, 0,
     ]
     hand_upper_limits = [
