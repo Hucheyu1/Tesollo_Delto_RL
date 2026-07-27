@@ -79,7 +79,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         # palm rather than beyond the fingertips; the Z offset preserves a
         # collision-free gap for all ten source objects.
         init_state=TESOLLO_CFG.init_state.replace(
-            pos=(-0.12, 0.022, 0.470),
+            pos=(-0.15, 0.022, 0.44),
             rot=(0.7071068, 0.0, 0.7071068, 0.0),
         ),
     )
