@@ -10,6 +10,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 import torch
+from pxr import UsdGeom
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -129,6 +130,10 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
     vtdex_tactile_body_names = DG5F_VTDEX_TACTILE_BODY_NAMES
     fingertip_body_names = list(vtdex_tactile_body_names)
     vtdex_tactile_indices = DG5F_VTDEX_TACTILE_INDICES
+    # The five silicone ``rl_dg_*_tip`` prims are detached visual children.
+    # Hide only their render geometry; articulated ``*_4`` links remain active
+    # for collision, contact reporting and all 20 VTDex tactile channels.
+    hide_dg5f_tip_visuals = True
 
     # Sample a reachable target position around the nominal in-hand point in
     # the hand-root frame. Orientation continues to use the base task's random
@@ -233,6 +238,7 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
             (self.num_envs, self.cfg.vtdex_embedding_dim), dtype=torch.float32, device=self.device
         )
         self._configure_vtdex_camera_pose()
+        self._hide_dg5f_tip_visuals()
         self._hide_goal_marker()
 
     def _setup_scene(self):
@@ -279,6 +285,22 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
         eyes_w = self.scene.env_origins + eye_local
         targets_w = self.scene.env_origins + target_local
         self._vtdex_camera.set_world_poses_from_view(eyes_w, targets_w)
+
+    def _hide_dg5f_tip_visuals(self):
+        """Hide detached silicone visuals without changing contact physics."""
+
+        if not self.cfg.hide_dg5f_tip_visuals:
+            return
+        for env_path in self.scene.env_prim_paths:
+            for finger_index in range(1, 6):
+                visual_path = f"{env_path}/Robot/rl_dg_{finger_index}_tip/visuals"
+                visual_prim = self.scene.stage.GetPrimAtPath(visual_path)
+                if not visual_prim.IsValid():
+                    raise RuntimeError(
+                        "Missing DG5F fingertip visual prim required by "
+                        f"hide_dg5f_tip_visuals: {visual_path}"
+                    )
+                UsdGeom.Imageable(visual_prim).MakeInvisible()
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         rgb = self._vtdex_camera.data.output["rgb"]
