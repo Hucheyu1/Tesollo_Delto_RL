@@ -120,6 +120,10 @@ mask ratio 0.75、触觉 mask ratio 0.5、20 路 binary tactile 和 CLS token。
   └── <model_id>.pt
 ```
 
+`<output_root>` 是模型产物根目录，不需要包含
+`model/vitac/vtt_reall.py`。运行时会从本项目内置的
+`vtdex_pretrained` 读取网络实现，只从 `<output_root>` 读取配置和权重。
+
 ## 5. 兼容性校验
 
 训练完成后运行：
@@ -146,6 +150,10 @@ python scripts/rsl_rl/train.py \
   --num_envs 16 \
   --headless
 ```
+
+注意：`TESOLLO_VTDEX_REPO_ROOT` 虽沿用历史名称，设置的应是包含
+`model/vitac/model_and_config/<model_id>.json/.pt` 的模型产物根目录，
+不是必须包含完整源码的 VTDexManip 仓库。
 
 不设置这两个环境变量时，Tomato 任务仍加载原来的
 `vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210`。

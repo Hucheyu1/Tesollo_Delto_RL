@@ -51,7 +51,10 @@ def parse_args() -> argparse.Namespace:
         "--output_root",
         type=Path,
         default=Path("outputs/vtdex_pretraining"),
-        help="输出根目录；可直接作为 Tomato 配置的 vtdex_repo_root。",
+        help=(
+            "模型产物输出根目录；可直接赋给 Tomato 的 "
+            "TESOLLO_VTDEX_REPO_ROOT，无需复制VTDex源码。"
+        ),
     )
     parser.add_argument("--model_id", type=str, default=None)
     parser.add_argument("--base_config", type=Path, default=DEFAULT_CONFIG)

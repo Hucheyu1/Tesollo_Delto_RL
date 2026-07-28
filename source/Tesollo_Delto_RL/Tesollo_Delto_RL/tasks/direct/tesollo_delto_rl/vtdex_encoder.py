@@ -39,20 +39,38 @@ class VTDexJointEncoder(nn.Module):
         self.tactile_indices = tuple(int(index) for index in tactile_indices)
 
         if not self.repo_root.is_dir():
-            raise FileNotFoundError(f"VTDexManip repository does not exist: {self.repo_root}")
+            raise FileNotFoundError(f"VTDex model root does not exist: {self.repo_root}")
 
         config_path = self.repo_root / "model" / "vitac" / "model_and_config" / f"{model_id}.json"
         checkpoint_path = self.repo_root / "model" / "vitac" / "model_and_config" / f"{model_id}.pt"
         if not config_path.is_file() or not checkpoint_path.is_file():
             raise FileNotFoundError(
-                "VTDexManip model files are missing. Expected both "
+                "VTDex model files are missing. Expected both "
                 f"{config_path} and {checkpoint_path}."
             )
 
-        # VTDexManip uses absolute imports rooted at its repository (model.*).
-        repo_root_str = str(self.repo_root)
-        if repo_root_str not in sys.path:
-            sys.path.insert(0, repo_root_str)
+        # Fine-tuning exports only ``model_and_config/*.json`` and ``*.pt``;
+        # it intentionally does not duplicate VTDexManip's Python sources.
+        # Load architecture code from a complete external checkout when one
+        # was explicitly supplied, otherwise use the self-contained copy next
+        # to this adapter. Model artifacts always come from ``repo_root``.
+        external_code_file = self.repo_root / "model" / "vitac" / "vtt_reall.py"
+        bundled_code_root = Path(__file__).resolve().parent / "vtdex_pretrained"
+        bundled_code_file = bundled_code_root / "model" / "vitac" / "vtt_reall.py"
+        if external_code_file.is_file():
+            code_root = self.repo_root
+        elif bundled_code_file.is_file():
+            code_root = bundled_code_root
+        else:
+            raise FileNotFoundError(
+                "VTDex architecture source is missing. Expected either "
+                f"{external_code_file} or {bundled_code_file}."
+            )
+
+        # VTDexManip uses absolute imports rooted at its code tree (model.*).
+        code_root_str = str(code_root)
+        if code_root_str not in sys.path:
+            sys.path.insert(0, code_root_str)
         from model.vitac.vtt_reall import VTT_ReAll
 
         with config_path.open(encoding="utf-8") as config_file:
