@@ -187,6 +187,45 @@ class TesolloDeltoVTDexPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
 
 @configclass
+class TesolloDeltoVTDexReorientUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Asymmetric PPO matching the source reorient_up training schedule."""
+
+    num_steps_per_env = 32
+    max_iterations = 5100
+    save_interval = 200
+    experiment_name = "TesolloDelto_vtdex_reorient_up"
+    obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+    actor = RslRlVTDexActorModelCfg(
+        hidden_dims=[1024, 1024, 512],
+        activation="elu",
+        obs_normalization=False,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
+            init_std=0.8,
+        ),
+    )
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[1024, 1024, 512],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=None,
+    )
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.0,
+        num_learning_epochs=10,
+        num_mini_batches=4,
+        learning_rate=3.0e-4,
+        schedule="adaptive",
+        gamma=0.96,
+        lam=0.95,
+        desired_kl=0.016,
+        max_grad_norm=1.0,
+    )
+
+
+@configclass
 class TesolloDeltoVTDexTomatoPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Preserved PPO configuration for the 471-D VTDex tomato task."""
 

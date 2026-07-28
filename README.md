@@ -11,7 +11,7 @@
 - OpenAI 风格观测维度为 `47`，critic state 维度为 `84`。
 - 蒸馏任务基于普通环境动力学，student observation 为 `47`，teacher observation 为 `84`。
 - 视觉环境配置位于 `tasks/direct/tesollo_delto_rl/tesollo_delto_rl_vision_env.py`，policy observation 为 `118`，critic state 为 `111`。
-- VTDexManip 桌面重定向环境使用项目内置的
+- VTDexManip 桌面与手内重定向环境使用项目内置的
   `vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210` 权重，policy observation 为 `424`，critic state 为
   `104`。
 - Gym 任务注册入口已整理到 `tasks/direct/tesollo_delto_rl/__init__.py`，任务名前缀为 `Tesollo-Delto-DG5F`。
@@ -28,6 +28,7 @@
 | `Tesollo-Delto-DG5F-Vision-Direct-Play-v0` | `TesolloDeltoRlVisionEnv` | `TesolloDeltoRlVisionEnvPlayCfg` |
 | `Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0` | `TesolloDeltoVTDexTomatoEnv` | `TesolloDeltoVTDexTomatoEnvCfg` |
 | `Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0` | `TesolloDeltoVTDexEnv` | `TesolloDeltoVTDexEnvCfg` |
+| `Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0` | `TesolloDeltoVTDexReorientUpEnv` | `TesolloDeltoVTDexReorientUpEnvCfg` |
 
 `Tesollo-Delto-DG5F-VTDex-Direct-v0` 保留为原番茄任务的兼容别名。
 
@@ -77,6 +78,7 @@ Tesollo_Delto_RL/
         ├── tesollo_delto_rl_env_cfg.py
         ├── tesollo_delto_rl_vision_env.py
         ├── tesollo_delto_vtdex_env.py
+        ├── tesollo_delto_vtdex_reorient_up_env.py
         ├── vtdex_encoder.py
         ├── vtdex_policy.py
         ├── vtdex_pretrained/
@@ -98,10 +100,11 @@ Tesollo_Delto_RL/
 | `yolo_seg_image_estimator.py` | 批量 YOLO-seg 二维中心、主轴角度与遮挡时序跟踪，用于蒸馏 student observation。 |
 | `foundationpose_estimator.py` | FoundationPose + RGB-D + mask 的物体 6D 位姿估计封装，用于仿真到真机迁移实验。 |
 | `tesollo_delto_vtdex_env.py` | VTDexManip `reorient_down-vt_all_cls` 到 Isaac Lab + DG5F 的桌面重定向适配。 |
+| `tesollo_delto_vtdex_reorient_up_env.py` | VTDexManip `reorient_up` 到 Isaac Lab + DG5F 的无桌面手内重定向适配。 |
 | `tesollo_delto_vtdex_tomato_env.py` | 独立保留的 DG5F 番茄位姿调整任务，使用 471 维 VTDex policy observation。 |
 | `vtdex_encoder.py` | 冻结的 VTDex RGB + 20 路二值触觉联合编码器封装。 |
 | `vtdex_policy.py` | 对齐上游 `ActorCriticVTEncoder` 的 40→128 本体状态分支和 384→128 VTDex CLS 分支。 |
-| `vtdex_pretrained/` | 已复制到本项目的 VTDex 模型、checkpoint、参考配置及 `reorient_down` 的 10 类 COACD 物体资产。 |
+| `vtdex_pretrained/` | 已复制到本项目的 VTDex 模型、checkpoint、`reorient_down/reorient_up` 参考配置及两项任务涉及的 COACD 物体资产。 |
 | `agents/rsl_rl_ppo_cfg.py` | RSL-RL PPO、distillation runner、policy 和算法参数。 |
 | `agents/rl_games_ppo_cfg.yaml` | RL-Games PPO 配置。 |
 | `robots/dg5f_right.usd` | DG5F 右手机器人主 USD。 |
@@ -240,6 +243,50 @@ python scripts/rsl_rl/play.py \
 
 预训练 checkpoint 较大且由 Git LFS 管理。克隆项目后若该文件仍是 LFS pointer，需要执行 `git lfs pull`。首次训练建议从
 10 个环境开始，以覆盖一轮完整物体集合；扩大规模时建议使用 10 的倍数。
+
+### VTDexManip 手内 Reorient Up
+
+`Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0` 独立复现上游
+`In-hand Reorientation / reorient_up`，不会覆盖 Tomato 或 Reorient Down：
+
+- 场景中没有桌面或地面，DG5F 手根固定，物体由手指在重力下保持；
+- 按上游顺序循环 cups-c、tennis ball、strawberry、cracker box、apple、Rubik's cube、
+  colored wood blocks、potted meat can、lemon 和 rubber duck，尺度均为 `0.04`；
+- 使用 DG5F 已验证的手内物体相对位姿与抓持初始关节值，同时保留完整物理关节范围供策略重定向；
+- 策略仍以 60 Hz 输出 20 维绝对关节位置，actor 输入仍为 40 维本体状态和 384 维冻结 VTDex CLS；
+- 原代码显示的目标姿态为相对初始 yaw `+90°`，但实际奖励以相对初始 yaw 的绝对值大于
+  `3 rad`（约 `172°`）判成功；本实现按实际奖励语义保留这一行为；
+- 原奖励中的水平漂移、竖直掉落、物体倾斜、Z 角速度、五指高度和动作惩罚均保留；
+- policy camera 为 `224×224` 侧视相机，debug 坐标轴、相机 debug visual 和脱离的白色硅胶指尖 visual
+  均关闭；环境间距为 `2.0 m`，避免并行环境串景。
+
+先检查单环境初始抓持和相机：
+
+```bash
+python scripts/zero_agent.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0 \
+  --num_envs 1 --headless --max_steps 10 \
+  --save_camera_frame outputs/vtdex_reorient_up_camera.png
+```
+
+覆盖一轮十类物体训练：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0 \
+  --num_envs 10 --headless
+```
+
+播放 checkpoint：
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0 \
+  --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT>
+```
+
+若要使用自行预训练的 DG5F VTDex encoder，可在启动前设置
+`TESOLLO_VTDEX_REPO_ROOT` 和 `TESOLLO_VTDEX_MODEL_ID`；未设置时使用项目内置官方模型。
 
 ### 保留的番茄 VTDex 任务
 

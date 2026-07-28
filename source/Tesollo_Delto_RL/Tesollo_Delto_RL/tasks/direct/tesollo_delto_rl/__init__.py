@@ -124,3 +124,23 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexPPORunnerCfg",
     },
 )
+
+# VTDexManip reorient_up: unsupported in-hand rotation with DG5F.
+gym.register(
+    id="Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0",
+    entry_point=(
+        f"{__name__}.tesollo_delto_vtdex_reorient_up_env:"
+        "TesolloDeltoVTDexReorientUpEnv"
+    ),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.tesollo_delto_vtdex_reorient_up_env:"
+            "TesolloDeltoVTDexReorientUpEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:"
+            "TesolloDeltoVTDexReorientUpPPORunnerCfg"
+        ),
+    },
+)
