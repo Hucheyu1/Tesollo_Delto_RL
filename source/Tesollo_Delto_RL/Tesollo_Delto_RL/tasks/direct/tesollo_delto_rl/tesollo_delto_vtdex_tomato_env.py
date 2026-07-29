@@ -123,6 +123,10 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
         "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210",
     )
     vtdex_embedding_dim = 384
+    # When enabled, zero both the explicit 20-D actor touch vector and the
+    # touch tokens passed to the frozen encoder. Raw contact force metrics and
+    # all physical interactions are intentionally left unchanged.
+    vtdex_mask_tactile_input = False
     # Match VTDex's layer-major token semantics: five fingers ordered
     # little/ring/middle/index/thumb at distal, then the same order at middle,
     # proximal and knuckle. DG5F's thumb-base link proxies the final Shadow-Hand
@@ -304,8 +308,17 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         rgb = self._vtdex_camera.data.output["rgb"]
-        tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
-        self.vtdex_embeddings = self.vtdex_encoder(rgb, tactile)
+        raw_tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
+        policy_tactile = (
+            torch.zeros_like(raw_tactile)
+            if self.cfg.vtdex_mask_tactile_input
+            else raw_tactile
+        )
+        self.vtdex_policy_tactile_input = policy_tactile
+        self.vtdex_embeddings = self.vtdex_encoder(rgb, policy_tactile)
+        self.extras.setdefault("log", {})["vtdex_policy_tactile_active_ratio"] = (
+            policy_tactile.mean()
+        )
 
         target_pos_hand = quat_apply(
             quat_conjugate(self.hand_base_rot),
@@ -318,7 +331,7 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
                 self.cfg.vel_obs_scale * self.hand_dof_vel,
                 target_pos_hand,
                 target_rot_hand,
-                tactile,
+                policy_tactile,
                 self.actions,
                 self.vtdex_embeddings,
             ),

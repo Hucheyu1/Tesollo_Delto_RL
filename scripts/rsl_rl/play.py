@@ -36,6 +36,24 @@ parser.add_argument(
 )
 parser.add_argument("--real-time", action="store_true", default=False, help="Run in real-time, if possible.")
 parser.add_argument(
+    "--mask_vtdex_tactile",
+    "--mask-vtdex-tactile",
+    action="store_true",
+    default=False,
+    help=(
+        "Set every VTDex tactile channel presented to the actor/encoder to zero while preserving "
+        "physical contacts and raw tactile metrics. Intended for tactile-ablation evaluation."
+    ),
+)
+parser.add_argument(
+    "--max_steps",
+    "--max-steps",
+    type=int,
+    default=0,
+    metavar="STEPS",
+    help="Stop play cleanly after this many policy steps (0 runs until the simulator closes).",
+)
+parser.add_argument(
     "--video_view",
     "--video-view",
     choices=("camera", "viewer"),
@@ -91,6 +109,8 @@ cli_args.add_rsl_rl_args(parser)
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
 args_cli, hydra_args = parser.parse_known_args()
+if args_cli.max_steps < 0:
+    parser.error("--max_steps must be non-negative")
 # Visual tasks require RTX camera rendering even without video output.
 if args_cli.video or (
     args_cli.task is not None and any(tag in args_cli.task for tag in ("Distill", "VTDex"))
@@ -196,6 +216,17 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    if args_cli.mask_vtdex_tactile:
+        if not hasattr(env_cfg, "vtdex_mask_tactile_input"):
+            raise ValueError(
+                "--mask_vtdex_tactile requires a VTDex task that implements "
+                "the vtdex_mask_tactile_input configuration option"
+            )
+        env_cfg.vtdex_mask_tactile_input = True
+        print(
+            "[INFO] VTDex tactile ablation enabled: actor/encoder receives 20 zero touch channels; "
+            "physics and raw tactile metrics remain active."
+        )
     if args_cli.video:
         if args_cli.video_view == "camera":
             _configure_video_camera_view(env_cfg)
@@ -314,6 +345,13 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    evaluation_reward_sum = 0.0
+    evaluation_sample_count = 0
+    evaluation_terminal_count = 0
+    evaluation_success_count = 0.0
+    evaluation_tactile_ratio_sum = 0.0
+    evaluation_policy_tactile_ratio_sum = 0.0
+    evaluation_tactile_steps = 0
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
@@ -322,22 +360,59 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
             # agent stepping
             actions = policy(obs)
             # env stepping
-            obs, _, dones, _ = env.step(actions)
+            obs, rewards, dones, extras = env.step(actions)
+            if args_cli.max_steps > 0:
+                evaluation_reward_sum += float(rewards.sum().item())
+                evaluation_sample_count += int(rewards.numel())
+                evaluation_terminal_count += int(dones.sum().item())
+                log_metrics = extras.get("log", {}) if isinstance(extras, dict) else {}
+                success_rate = log_metrics.get("table_success_rate")
+                if success_rate is None:
+                    success_rate = log_metrics.get("reorient_up_success_rate")
+                if success_rate is not None:
+                    evaluation_success_count += float(success_rate) * int(env.unwrapped.num_envs)
+                tactile_ratio = log_metrics.get("vtdex_tactile_active_ratio")
+                policy_tactile_ratio = log_metrics.get("vtdex_policy_tactile_active_ratio")
+                if tactile_ratio is not None and policy_tactile_ratio is not None:
+                    evaluation_tactile_ratio_sum += float(tactile_ratio)
+                    evaluation_policy_tactile_ratio_sum += float(policy_tactile_ratio)
+                    evaluation_tactile_steps += 1
             # reset recurrent states for episodes that have terminated
             if version.parse(installed_version) >= version.parse("4.0.0"):
                 policy.reset(dones)
             else:
                 policy_nn.reset(dones)
+        timestep += 1
         if args_cli.video:
-            timestep += 1
             # Exit the play loop after recording one video
             if timestep == args_cli.video_length:
                 break
+        if args_cli.max_steps > 0 and timestep >= args_cli.max_steps:
+            break
 
         # time delay for real-time evaluation
         sleep_time = dt - (time.time() - start_time)
         if args_cli.real_time and sleep_time > 0:
             time.sleep(sleep_time)
+
+    if args_cli.max_steps > 0:
+        mean_reward = evaluation_reward_sum / max(evaluation_sample_count, 1)
+        success_per_terminal = evaluation_success_count / max(evaluation_terminal_count, 1)
+        print(
+            "[EVAL] "
+            f"steps={timestep}, env_samples={evaluation_sample_count}, "
+            f"mean_reward={mean_reward:.6f}, terminals={evaluation_terminal_count}, "
+            f"successes={evaluation_success_count:.1f}, "
+            f"success_per_terminal={success_per_terminal:.6f}"
+        )
+        if evaluation_tactile_steps > 0:
+            print(
+                "[EVAL] "
+                f"raw_tactile_active_ratio="
+                f"{evaluation_tactile_ratio_sum / evaluation_tactile_steps:.6f}, "
+                f"policy_tactile_active_ratio="
+                f"{evaluation_policy_tactile_ratio_sum / evaluation_tactile_steps:.6f}"
+            )
 
     # close the simulator
     env.close()

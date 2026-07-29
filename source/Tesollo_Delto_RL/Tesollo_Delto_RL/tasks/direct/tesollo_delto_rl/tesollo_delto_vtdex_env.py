@@ -264,6 +264,10 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     vtdex_repo_root = str(_VTDEx_ROOT)
     vtdex_model_id = "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210"
     vtdex_embedding_dim = 384
+    # Tactile ablation changes only the policy input. Contact sensing, reward,
+    # termination and raw force logs remain active so masked/unmasked runs use
+    # identical physics and can be compared directly.
+    vtdex_mask_tactile_input = False
     # Match VTDex's layer-major token semantics: five fingers ordered
     # little/ring/middle/index/thumb at distal, then the same order at middle,
     # proximal and knuckle. DG5F's thumb-base link proxies the final Shadow-Hand
@@ -498,8 +502,17 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
 
     def _get_observations(self) -> dict[str, torch.Tensor]:
         rgb = self._vtdex_camera.data.output["rgb"]
-        tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
-        self.vtdex_embeddings = self.vtdex_encoder(rgb, tactile)
+        raw_tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
+        policy_tactile = (
+            torch.zeros_like(raw_tactile)
+            if self.cfg.vtdex_mask_tactile_input
+            else raw_tactile
+        )
+        self.vtdex_policy_tactile_input = policy_tactile
+        self.vtdex_embeddings = self.vtdex_encoder(rgb, policy_tactile)
+        self.extras.setdefault("log", {})["vtdex_policy_tactile_active_ratio"] = (
+            policy_tactile.mean()
+        )
 
         # Match reorient_down's policy boundary: only hand proprioception and
         # the frozen joint RGB/touch representation are exposed to the actor.

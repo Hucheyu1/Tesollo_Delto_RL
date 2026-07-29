@@ -241,6 +241,20 @@ python scripts/rsl_rl/play.py \
   --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT>
 ```
 
+屏蔽策略触觉输入做消融测试（物理接触和原始触觉力日志仍保留）：
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0 \
+  --num_envs 10 \
+  --checkpoint logs/rsl_rl/TesolloDelto_vtdex/2026-07-27_21-52-00/model_5099.pt \
+  --mask_vtdex_tactile --max_steps 600
+```
+
+此开关会将送入 VTDex encoder 的 20 路触觉全部置零，但不会关闭 ContactSensor，也不会改变接触动力学、
+奖励或终止条件。因而 `vtdex_tactile_active_ratio` 仍表示物理上测得的真实触觉，
+`vtdex_policy_tactile_active_ratio` 则应始终为 `0`。
+
 预训练 checkpoint 较大且由 Git LFS 管理。克隆项目后若该文件仍是 LFS pointer，需要执行 `git lfs pull`。首次训练建议从
 10 个环境开始，以覆盖一轮完整物体集合；扩大规模时建议使用 10 的倍数。
 
