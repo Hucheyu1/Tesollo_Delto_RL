@@ -19,10 +19,7 @@ from isaaclab_rl.rsl_rl import (
 class RslRlVTDexActorModelCfg(RslRlMLPModelCfg):
     """Separate DG5F proprioception and VTDex CLS projection configuration."""
 
-    class_name = (
-        "Tesollo_Delto_RL.tasks.direct.tesollo_delto_rl.vtdex_policy:"
-        "VTDexActorModel"
-    )
+    class_name = "Tesollo_Delto_RL.tasks.direct.tesollo_delto_rl.vtdex_policy:VTDexActorModel"
     proprioception_dim = 40
     vtdex_embedding_dim = 384
     projection_dim = 128
@@ -223,6 +220,16 @@ class TesolloDeltoVTDexReorientUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         desired_kl=0.016,
         max_grad_norm=1.0,
     )
+
+
+@configclass
+class TesolloDeltoVTDexBottleCapPPORunnerCfg(TesolloDeltoVTDexReorientUpPPORunnerCfg):
+    """PPO schedule matching VTDexManip's bottle_cap.yaml."""
+
+    num_steps_per_env = 32
+    max_iterations = 10000
+    save_interval = 500
+    experiment_name = "TesolloDelto_vtdex_bottle_cap"
 
 
 @configclass

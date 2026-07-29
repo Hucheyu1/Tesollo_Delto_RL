@@ -144,3 +144,24 @@ gym.register(
         ),
     },
 )
+
+# VTDexManip bottle_cap: fixed bottle body and one passive cap joint, with the
+# Shadow Hand replaced by DG5F.
+gym.register(
+    id="Tesollo-Delto-DG5F-VTDex-Bottle-Cap-Direct-v0",
+    entry_point=(
+        f"{__name__}.tesollo_delto_vtdex_bottle_cap_env:"
+        "TesolloDeltoVTDexBottleCapEnv"
+    ),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (
+            f"{__name__}.tesollo_delto_vtdex_bottle_cap_env:"
+            "TesolloDeltoVTDexBottleCapEnvCfg"
+        ),
+        "rsl_rl_cfg_entry_point": (
+            f"{agents.__name__}.rsl_rl_ppo_cfg:"
+            "TesolloDeltoVTDexBottleCapPPORunnerCfg"
+        ),
+    },
+)
