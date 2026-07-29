@@ -268,7 +268,11 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
     def _get_observations(self) -> dict[str, torch.Tensor]:
         rgb = self._vtdex_camera.data.output["rgb"]
         raw_tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
-        policy_tactile = torch.zeros_like(raw_tactile) if self.cfg.vtdex_mask_tactile_input else raw_tactile
+        policy_tactile = (
+            raw_tactile
+            if self.cfg.vtdex_model_mode == "joint" and not self.cfg.vtdex_mask_tactile_input
+            else torch.zeros_like(raw_tactile)
+        )
         self.vtdex_policy_tactile_input = policy_tactile
         self.vtdex_embeddings = self.vtdex_encoder(rgb, policy_tactile)
         self.extras.setdefault("log", {})["vtdex_policy_tactile_active_ratio"] = policy_tactile.mean()

@@ -15,6 +15,7 @@ from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+import vtdex_model_args  # isort: skip
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -103,6 +104,7 @@ parser.add_argument(
     metavar=("W", "X", "Y", "Z"),
     help="Fix self.goal_rot directly as a world/env quaternion in w x y z order. Takes precedence over angle.",
 )
+vtdex_model_args.add_vtdex_model_arg(parser)
 # append RSL-RL cli arguments
 cli_args.add_rsl_rl_args(parser)
 # append AppLauncher cli args
@@ -216,6 +218,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # override configurations with non-hydra CLI arguments
     agent_cfg: RslRlBaseRunnerCfg = cli_args.update_rsl_rl_cfg(agent_cfg, args_cli)
     env_cfg.scene.num_envs = args_cli.num_envs if args_cli.num_envs is not None else env_cfg.scene.num_envs
+    vtdex_model_args.apply_vtdex_model_selection(env_cfg, agent_cfg, args_cli.model)
     if args_cli.mask_vtdex_tactile:
         if not hasattr(env_cfg, "vtdex_mask_tactile_input"):
             raise ValueError(
@@ -223,10 +226,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                 "the vtdex_mask_tactile_input configuration option"
             )
         env_cfg.vtdex_mask_tactile_input = True
-        print(
-            "[INFO] VTDex tactile ablation enabled: actor/encoder receives 20 zero touch channels; "
-            "physics and raw tactile metrics remain active."
-        )
+        if args_cli.model == "vision":
+            print(
+                "[INFO] VTDex tactile ablation flag is redundant in vision mode: V-CLIP never receives "
+                "touch; the Tomato actor's touch placeholders remain zero."
+            )
+        else:
+            print(
+                "[INFO] VTDex tactile ablation enabled: actor/encoder receives 20 zero touch channels; "
+                "physics and raw tactile metrics remain active."
+            )
     if args_cli.video:
         if args_cli.video_view == "camera":
             _configure_video_camera_view(env_cfg)

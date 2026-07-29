@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Sequence
 from pathlib import Path
 
@@ -24,7 +25,11 @@ from isaaclab.utils.math import quat_apply, quat_from_angle_axis, quat_mul, samp
 from .delto_cfg import TESOLLO_CFG
 from .tesollo_delto_rl_env import TesolloDeltoRlEnv, rotation_distance, unscale
 from .tesollo_delto_rl_env_cfg import TesolloDeltoRlEnvCfg
-from .vtdex_encoder import VTDexJointEncoder
+from .vtdex_encoder import (
+    VTDEX_JOINT_MODEL_ID,
+    VTDEX_VISION_MODEL_ID,
+    VTDexPretrainedEncoder,
+)
 
 _VTDEx_ROOT = Path(__file__).resolve().parent / "vtdex_pretrained"
 _VTDEx_OBJECT_ROOT = _VTDEx_ROOT / "assets" / "reorient_up"
@@ -261,9 +266,15 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
 
     # Self-contained copy under this project; no external VTDexManip checkout
     # is needed at training or deployment time.
-    vtdex_repo_root = str(_VTDEx_ROOT)
-    vtdex_model_id = "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210"
+    # ``joint`` is the original VT-JointPretrain setup. ``vision`` selects the
+    # paper's strongest pretrained visual baseline, V-CLIP.
+    vtdex_model_mode = "joint"
+    vtdex_repo_root = os.environ.get("TESOLLO_VTDEX_REPO_ROOT", str(_VTDEx_ROOT))
+    vtdex_model_id = os.environ.get("TESOLLO_VTDEX_MODEL_ID", VTDEX_JOINT_MODEL_ID)
+    vtdex_vision_repo_root = os.environ.get("TESOLLO_VTDEX_VISION_REPO_ROOT", str(_VTDEx_ROOT))
+    vtdex_vision_model_id = VTDEX_VISION_MODEL_ID
     vtdex_embedding_dim = 384
+    vtdex_vision_embedding_dim = 512
     # Tactile ablation changes only the policy input. Contact sensing, reward,
     # termination and raw force logs remain active so masked/unmasked runs use
     # identical physics and can be compared directly.
@@ -360,11 +371,26 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
             )
         self._vtdex_contact_body_ids = torch.tensor(contact_body_ids, dtype=torch.long, device=self.device)
         print(f"[INFO]: VTDex tactile ContactSensor mapping (net contact force): {contact_body_names}")
-        self.vtdex_encoder = VTDexJointEncoder(
-            repo_root=self.cfg.vtdex_repo_root,
-            model_id=self.cfg.vtdex_model_id,
+        encoder_repo_root = (
+            self.cfg.vtdex_repo_root
+            if self.cfg.vtdex_model_mode == "joint"
+            else self.cfg.vtdex_vision_repo_root
+        )
+        encoder_model_id = (
+            self.cfg.vtdex_model_id
+            if self.cfg.vtdex_model_mode == "joint"
+            else self.cfg.vtdex_vision_model_id
+        )
+        self.vtdex_encoder = VTDexPretrainedEncoder(
+            model_mode=self.cfg.vtdex_model_mode,
+            repo_root=encoder_repo_root,
+            model_id=encoder_model_id,
             device=self.device,
             tactile_indices=tuple(self.cfg.vtdex_tactile_indices),
+        )
+        print(
+            "[INFO]: VTDex frozen encoder: "
+            f"mode={self.cfg.vtdex_model_mode}, model_id={encoder_model_id}, root={encoder_repo_root}"
         )
         if self.vtdex_encoder.embedding_dim != self.cfg.vtdex_embedding_dim:
             raise ValueError(
@@ -504,9 +530,9 @@ class TesolloDeltoVTDexEnv(TesolloDeltoRlEnv):
         rgb = self._vtdex_camera.data.output["rgb"]
         raw_tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
         policy_tactile = (
-            torch.zeros_like(raw_tactile)
-            if self.cfg.vtdex_mask_tactile_input
-            else raw_tactile
+            raw_tactile
+            if self.cfg.vtdex_model_mode == "joint" and not self.cfg.vtdex_mask_tactile_input
+            else torch.zeros_like(raw_tactile)
         )
         self.vtdex_policy_tactile_input = policy_tactile
         self.vtdex_embeddings = self.vtdex_encoder(rgb, policy_tactile)

@@ -1,12 +1,13 @@
 # Copyright (c) 2022-2026, The Isaac Lab Project Developers
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Frozen VTDexManip visual-tactile representation adapter.
+"""Frozen VTDexManip pretrained representation adapters.
 
 The original VTDexManip policy stores the frozen backbone outside PPO and learns
 the downstream projection together with the actor.  This adapter exposes the
-384-dimensional pretrained CLS token directly; the RSL-RL actor's first layer
-therefore plays the role of the trainable downstream projection.
+pretrained feature directly. ``joint`` uses the official VT-JointPretrain CLS
+token, while ``vision`` uses the strongest pure-vision baseline reported by
+the paper, V-CLIP (CLIP ViT-B/16).
 """
 
 from __future__ import annotations
@@ -21,18 +22,27 @@ import torch.nn.functional as F
 from torch import nn
 
 
-class VTDexJointEncoder(nn.Module):
-    """Load and run VTDexManip's frozen joint RGB/binary-touch encoder."""
+VTDEX_JOINT_MODEL_ID = "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210"
+VTDEX_VISION_MODEL_ID = "CLIP"
+VTDEX_MODEL_MODES = ("joint", "vision")
+
+
+class VTDexPretrainedEncoder(nn.Module):
+    """Load either VTDexManip's joint or visual-only frozen encoder."""
 
     def __init__(
         self,
         *,
+        model_mode: str,
         repo_root: str,
         model_id: str,
         device: str | torch.device,
         tactile_indices: tuple[int, ...],
     ) -> None:
         super().__init__()
+        if model_mode not in VTDEX_MODEL_MODES:
+            raise ValueError(f"model_mode must be one of {VTDEX_MODEL_MODES}, got {model_mode!r}")
+        self.model_mode = model_mode
         self.repo_root = Path(repo_root).expanduser().resolve()
         self.model_id = model_id
         self.device = torch.device(device)
@@ -41,63 +51,111 @@ class VTDexJointEncoder(nn.Module):
         if not self.repo_root.is_dir():
             raise FileNotFoundError(f"VTDex model root does not exist: {self.repo_root}")
 
-        config_path = self.repo_root / "model" / "vitac" / "model_and_config" / f"{model_id}.json"
-        checkpoint_path = self.repo_root / "model" / "vitac" / "model_and_config" / f"{model_id}.pt"
-        if not config_path.is_file() or not checkpoint_path.is_file():
-            raise FileNotFoundError(
-                "VTDex model files are missing. Expected both "
-                f"{config_path} and {checkpoint_path}."
+        if model_mode == "joint":
+            config_path = self.repo_root / "model" / "vitac" / "model_and_config" / f"{model_id}.json"
+            checkpoint_path = self.repo_root / "model" / "vitac" / "model_and_config" / f"{model_id}.pt"
+            if not config_path.is_file() or not checkpoint_path.is_file():
+                raise FileNotFoundError(
+                    "VTDex joint-model files are missing. Expected both "
+                    f"{config_path} and {checkpoint_path}."
+                )
+            architecture_file = self.repo_root / "model" / "vitac" / "vtt_reall.py"
+            bundled_architecture_file = (
+                Path(__file__).resolve().parent
+                / "vtdex_pretrained"
+                / "model"
+                / "vitac"
+                / "vtt_reall.py"
+            )
+        else:
+            if model_id != VTDEX_VISION_MODEL_ID:
+                raise ValueError(
+                    f"vision mode expects model_id={VTDEX_VISION_MODEL_ID!r}, got {model_id!r}"
+                )
+            checkpoint_path = (
+                self.repo_root
+                / "model"
+                / "backbones"
+                / "pre_model_baselines"
+                / "clip"
+                / "ViT-B-16.pt"
+            )
+            if not checkpoint_path.is_file():
+                raise FileNotFoundError(f"VTDex V-CLIP checkpoint is missing: {checkpoint_path}")
+            architecture_file = (
+                self.repo_root
+                / "model"
+                / "backbones"
+                / "pre_model_baselines"
+                / "clip"
+                / "clip.py"
+            )
+            bundled_architecture_file = (
+                Path(__file__).resolve().parent
+                / "vtdex_pretrained"
+                / "model"
+                / "backbones"
+                / "pre_model_baselines"
+                / "clip"
+                / "clip.py"
             )
 
-        # Fine-tuning exports only ``model_and_config/*.json`` and ``*.pt``;
-        # it intentionally does not duplicate VTDexManip's Python sources.
+        # Fine-tuning exports may contain only model artifacts and intentionally
+        # omit VTDexManip's Python sources.
         # Load architecture code from a complete external checkout when one
         # was explicitly supplied, otherwise use the self-contained copy next
         # to this adapter. Model artifacts always come from ``repo_root``.
-        external_code_file = self.repo_root / "model" / "vitac" / "vtt_reall.py"
         bundled_code_root = Path(__file__).resolve().parent / "vtdex_pretrained"
-        bundled_code_file = bundled_code_root / "model" / "vitac" / "vtt_reall.py"
-        if external_code_file.is_file():
+        if architecture_file.is_file():
             code_root = self.repo_root
-        elif bundled_code_file.is_file():
+        elif bundled_architecture_file.is_file():
             code_root = bundled_code_root
         else:
             raise FileNotFoundError(
                 "VTDex architecture source is missing. Expected either "
-                f"{external_code_file} or {bundled_code_file}."
+                f"{architecture_file} or {bundled_architecture_file}."
             )
 
         # VTDexManip uses absolute imports rooted at its code tree (model.*).
         code_root_str = str(code_root)
         if code_root_str not in sys.path:
             sys.path.insert(0, code_root_str)
-        from model.vitac.vtt_reall import VTT_ReAll
+        if model_mode == "vision":
+            from model.backbones.pre_model_baselines import clip
 
-        with config_path.open(encoding="utf-8") as config_file:
-            model_cfg = json.load(config_file)
-        self.expected_tactile_dim = int(model_cfg["input_cfg"]["tactile_dim"])
-        self.embedding_dim = int(model_cfg["encoder_decoder_cfg"]["encoder_embed_dim"])
+            backbone, _ = clip.load(str(checkpoint_path), device="cpu")
+            self.expected_tactile_dim = 0
+            self.embedding_dim = int(backbone.visual.output_dim)
+        else:
+            from model.vitac.vtt_reall import VTT_ReAll
 
-        if len(self.tactile_indices) == 0:
-            raise ValueError("vtdex_tactile_indices must contain at least one destination index")
-        if len(set(self.tactile_indices)) != len(self.tactile_indices):
-            raise ValueError("vtdex_tactile_indices must not contain duplicates")
-        if min(self.tactile_indices) < 0 or max(self.tactile_indices) >= self.expected_tactile_dim:
-            raise ValueError(
-                f"vtdex_tactile_indices must be within [0, {self.expected_tactile_dim - 1}], "
-                f"got {self.tactile_indices}"
+            with config_path.open(encoding="utf-8") as config_file:
+                model_cfg = json.load(config_file)
+            self.expected_tactile_dim = int(model_cfg["input_cfg"]["tactile_dim"])
+            self.embedding_dim = int(model_cfg["encoder_decoder_cfg"]["encoder_embed_dim"])
+            backbone = VTT_ReAll(**model_cfg)
+
+        if model_mode == "joint":
+            if len(self.tactile_indices) == 0:
+                raise ValueError("vtdex_tactile_indices must contain at least one destination index")
+            if len(set(self.tactile_indices)) != len(self.tactile_indices):
+                raise ValueError("vtdex_tactile_indices must not contain duplicates")
+            if min(self.tactile_indices) < 0 or max(self.tactile_indices) >= self.expected_tactile_dim:
+                raise ValueError(
+                    f"vtdex_tactile_indices must be within [0, {self.expected_tactile_dim - 1}], "
+                    f"got {self.tactile_indices}"
+                )
+
+        if model_mode == "joint":
+            checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
+            checkpoint_state = checkpoint["model_state_dict"]
+            model_state = backbone.state_dict()
+            cleaned_state = OrderedDict(
+                (key.replace("module.", ""), value)
+                for key, value in checkpoint_state.items()
+                if key.replace("module.", "") in model_state
             )
-
-        backbone = VTT_ReAll(**model_cfg)
-        checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-        checkpoint_state = checkpoint["model_state_dict"]
-        model_state = backbone.state_dict()
-        cleaned_state = OrderedDict(
-            (key.replace("module.", ""), value)
-            for key, value in checkpoint_state.items()
-            if key.replace("module.", "") in model_state
-        )
-        backbone.load_state_dict(cleaned_state, strict=True)
+            backbone.load_state_dict(cleaned_state, strict=True)
         backbone.requires_grad_(False)
         backbone.eval()
         self.backbone = backbone.to(self.device)
@@ -116,19 +174,11 @@ class VTDexJointEncoder(nn.Module):
         )
 
     @torch.inference_mode()
-    def forward(self, rgb: torch.Tensor, tactile: torch.Tensor) -> torch.Tensor:
-        """Return one frozen joint representation per environment."""
+    def forward(self, rgb: torch.Tensor, tactile: torch.Tensor | None = None) -> torch.Tensor:
+        """Return one frozen pretrained representation per environment."""
 
         if rgb.ndim != 4 or rgb.shape[-1] < 3:
             raise ValueError(f"Expected RGB tensor [N,H,W,C>=3], got {tuple(rgb.shape)}")
-        if tactile.ndim != 2 or tactile.shape[1] != len(self.tactile_indices):
-            raise ValueError(
-                f"Expected tactile tensor [N,{len(self.tactile_indices)}], got {tuple(tactile.shape)}"
-            )
-        if rgb.shape[0] != tactile.shape[0]:
-            raise ValueError(
-                f"RGB/tactile batch sizes must match, got {rgb.shape[0]} and {tactile.shape[0]}"
-            )
 
         image = rgb[..., :3].permute(0, 3, 1, 2).contiguous()
         image = image.to(device=self.device, dtype=torch.float32)
@@ -142,6 +192,19 @@ class VTDexJointEncoder(nn.Module):
             image = F.interpolate(image, size=(224, 224), mode="bilinear", align_corners=False)
         image = (image - self.image_mean) / self.image_std
 
+        if self.model_mode == "vision":
+            features = self.backbone.encode_image(image)
+            return features.detach()
+
+        if tactile is None or tactile.ndim != 2 or tactile.shape[1] != len(self.tactile_indices):
+            tactile_shape = None if tactile is None else tuple(tactile.shape)
+            raise ValueError(
+                f"Expected tactile tensor [N,{len(self.tactile_indices)}], got {tactile_shape}"
+            )
+        if rgb.shape[0] != tactile.shape[0]:
+            raise ValueError(
+                f"RGB/tactile batch sizes must match, got {rgb.shape[0]} and {tactile.shape[0]}"
+            )
         padded_tactile = torch.zeros(
             (tactile.shape[0], self.expected_tactile_dim),
             dtype=torch.float32,
@@ -151,3 +214,10 @@ class VTDexJointEncoder(nn.Module):
 
         features = self.backbone.get_representations(image, padded_tactile, mode="cls")
         return features.detach()
+
+
+class VTDexJointEncoder(VTDexPretrainedEncoder):
+    """Backward-compatible joint-encoder constructor."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(model_mode="joint", **kwargs)

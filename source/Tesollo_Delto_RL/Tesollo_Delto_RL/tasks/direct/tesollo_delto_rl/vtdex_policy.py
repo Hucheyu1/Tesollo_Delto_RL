@@ -17,10 +17,10 @@ from rsl_rl.modules import HiddenState
 class VTDexActorModel(MLPModel):
     """Project proprioception and frozen VTDex CLS features before fusion.
 
-    The upstream ``ActorCriticVTEncoder`` separately maps proprioception and
-    the 384-D pretrained representation to 128-D features, concatenates them,
-    and feeds the result to the policy MLP. DG5F changes only the
-    proprioception width from Shadow Hand's 48 values to 40 values.
+    The upstream encoder policies separately map proprioception and the frozen
+    representation to 128-D features, concatenate them, and feed the result to
+    the policy MLP. The representation is 384-D for VT-JointPretrain and 512-D
+    for V-CLIP; DG5F proprioception is 40-D.
     """
 
     def __init__(

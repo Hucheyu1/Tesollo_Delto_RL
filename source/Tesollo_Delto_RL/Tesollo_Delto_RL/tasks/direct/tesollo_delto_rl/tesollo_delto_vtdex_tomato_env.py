@@ -39,7 +39,11 @@ from .vtdex_data import (
     DG5F_VTDEX_TOMATO_MARKER_OFFSETS,
     DG5F_VTDEX_TOMATO_MARKER_RADIUS,
 )
-from .vtdex_encoder import VTDexJointEncoder
+from .vtdex_encoder import (
+    VTDEX_JOINT_MODEL_ID,
+    VTDEX_VISION_MODEL_ID,
+    VTDexPretrainedEncoder,
+)
 from .vtdex_markers import spawn_tomato_orientation_markers
 
 
@@ -108,7 +112,9 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
 
     # actor = qpos(20) + qvel(20) + target position in hand frame(3)
     #       + target quaternion in hand frame(4) + binary tactile(20)
-    #       + previous action(20) + frozen VTDex CLS feature(384) = 471
+    #       + previous action(20) + frozen feature(384 joint / 512 V-CLIP)
+    # Default joint observation is 471; CLI selection updates this to 599 for
+    # pure vision before the environment is constructed.
     observation_space = 471
     # critic keeps the 84-dimensional simulator state plus 20 tactile values.
     state_space = 104
@@ -117,12 +123,16 @@ class TesolloDeltoVTDexTomatoEnvCfg(TesolloDeltoRlEnvCfg):
 
     # Use the self-contained checkpoint copy shared with the upstream-scene
     # reproduction; this task no longer depends on an external checkout.
+    vtdex_model_mode = "joint"
     vtdex_repo_root = os.environ.get("TESOLLO_VTDEX_REPO_ROOT", str(_VTDEx_ROOT))
     vtdex_model_id = os.environ.get(
         "TESOLLO_VTDEX_MODEL_ID",
-        "vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210",
+        VTDEX_JOINT_MODEL_ID,
     )
+    vtdex_vision_repo_root = os.environ.get("TESOLLO_VTDEX_VISION_REPO_ROOT", str(_VTDEx_ROOT))
+    vtdex_vision_model_id = VTDEX_VISION_MODEL_ID
     vtdex_embedding_dim = 384
+    vtdex_vision_embedding_dim = 512
     # When enabled, zero both the explicit 20-D actor touch vector and the
     # touch tokens passed to the frozen encoder. Raw contact force metrics and
     # all physical interactions are intentionally left unchanged.
@@ -227,11 +237,26 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
             f"{contact_body_names}"
         )
         self._spawn_tomato_orientation_markers()
-        self.vtdex_encoder = VTDexJointEncoder(
-            repo_root=self.cfg.vtdex_repo_root,
-            model_id=self.cfg.vtdex_model_id,
+        encoder_repo_root = (
+            self.cfg.vtdex_repo_root
+            if self.cfg.vtdex_model_mode == "joint"
+            else self.cfg.vtdex_vision_repo_root
+        )
+        encoder_model_id = (
+            self.cfg.vtdex_model_id
+            if self.cfg.vtdex_model_mode == "joint"
+            else self.cfg.vtdex_vision_model_id
+        )
+        self.vtdex_encoder = VTDexPretrainedEncoder(
+            model_mode=self.cfg.vtdex_model_mode,
+            repo_root=encoder_repo_root,
+            model_id=encoder_model_id,
             device=self.device,
             tactile_indices=tuple(self.cfg.vtdex_tactile_indices),
+        )
+        print(
+            "[INFO]: VTDex frozen encoder: "
+            f"mode={self.cfg.vtdex_model_mode}, model_id={encoder_model_id}, root={encoder_repo_root}"
         )
         if self.vtdex_encoder.embedding_dim != self.cfg.vtdex_embedding_dim:
             raise ValueError(
@@ -310,9 +335,9 @@ class TesolloDeltoVTDexTomatoEnv(TesolloDeltoRlEnv):
         rgb = self._vtdex_camera.data.output["rgb"]
         raw_tactile = self.fingertip_force_binary_results.to(dtype=torch.float32)
         policy_tactile = (
-            torch.zeros_like(raw_tactile)
-            if self.cfg.vtdex_mask_tactile_input
-            else raw_tactile
+            raw_tactile
+            if self.cfg.vtdex_model_mode == "joint" and not self.cfg.vtdex_mask_tactile_input
+            else torch.zeros_like(raw_tactile)
         )
         self.vtdex_policy_tactile_input = policy_tactile
         self.vtdex_embeddings = self.vtdex_encoder(rgb, policy_tactile)

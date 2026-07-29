@@ -105,7 +105,7 @@ Tesollo_Delto_RL/
 | `tesollo_delto_vtdex_reorient_up_env.py` | VTDexManip `reorient_up` 到 Isaac Lab + DG5F 的无桌面手内重定向适配。 |
 | `tesollo_delto_vtdex_bottle_cap_env.py` | VTDexManip `bottle_cap` 到 Isaac Lab + DG5F 的固定瓶身、单关节瓶盖旋转适配。 |
 | `tesollo_delto_vtdex_tomato_env.py` | 独立保留的 DG5F 番茄位姿调整任务，使用 471 维 VTDex policy observation。 |
-| `vtdex_encoder.py` | 冻结的 VTDex RGB + 20 路二值触觉联合编码器封装。 |
+| `vtdex_encoder.py` | 冻结的 VTDex VT-JointPretrain 与 V-CLIP 纯视觉编码器统一封装。 |
 | `vtdex_policy.py` | 对齐上游 `ActorCriticVTEncoder` 的 40→128 本体状态分支和 384→128 VTDex CLS 分支。 |
 | `vtdex_pretrained/` | 已复制到本项目的 VTDex 模型、checkpoint、`reorient_down/reorient_up/bottle_cap` 参考配置及三项任务涉及的物体资产。 |
 | `agents/rsl_rl_ppo_cfg.py` | RSL-RL PPO、distillation runner、policy 和算法参数。 |
@@ -218,6 +218,50 @@ python scripts/rl_games/train.py --task Tesollo-Delto-DG5F-Direct-v0 --num_envs 
 
 指定 checkpoint 作为冻结的视觉—触觉表征初始化使用。由于 Shadow Hand 与 DG5F 的运动学、关节限制和动作含义不同，
 下游 PPO actor/critic 必须在 DG5F 环境中重新训练，不能直接复用 Shadow Hand 的控制策略权重。
+
+### 联合模型与纯视觉模型对照
+
+所有四个 VTDex 任务都支持统一的 `--model` 参数：
+
+- `--model joint`（默认）：使用原项目 VT-JointPretrain
+  `vt20t-reall-tmr05-bin-ft-cls+dataset-ViTacReal-all-210`，输入 RGB 与 20 路二值触觉。
+- `--model vision`：使用论文六任务平均结果最好的预训练纯视觉基线 V-CLIP（CLIP ViT-B/16），只输入 RGB，
+  不调用触觉编码分支。论文报告其 Seen/Unseen 平均成功率为 `61.3%/49.4%`，高于原项目自训
+  V-Pretrain 的 `54.0%/46.1%`。
+
+VT-JointPretrain 输出 384 维 CLS，V-CLIP 输出 512 维图像特征；命令行会同步调整环境 observation 和
+Down/Up/Bottle Cap 的可训练视觉投影层，因此两者都先投影到 128 维再与本体特征融合，和原项目各自的 policy
+拓扑一致。Tomato 的 20 维触觉占位在纯视觉模式中始终填零。critic 的仿真特权状态、物理接触、奖励和终止条件
+不变，从而只比较 actor 的预训练感知模态。纯视觉训练自动写入原实验名加 `_vision` 的目录，防止与 joint
+checkpoint 混用。
+
+例如训练纯视觉 Reorient Down：
+
+```bash
+python scripts/rsl_rl/train.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0 \
+  --model vision --num_envs 10 --headless
+```
+
+其余任务只需替换 `--task`：
+
+```text
+Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0
+Tesollo-Delto-DG5F-VTDex-Tomato-Direct-v0
+Tesollo-Delto-DG5F-VTDex-Bottle-Cap-Direct-v0
+```
+
+播放纯视觉策略时也必须使用相同模式：
+
+```bash
+python scripts/rsl_rl/play.py \
+  --task Tesollo-Delto-DG5F-VTDex-Reorient-Down-Direct-v0 \
+  --model vision --num_envs 1 --checkpoint <VISION_CHECKPOINT>
+```
+
+项目内已复制原项目的 CLIP ViT-B/16 模型代码和 checkpoint，默认不依赖外部 VTDexManip 路径。若要把同布局的
+VTDexManip 模型目录放到别处，可设置 `TESOLLO_VTDEX_VISION_REPO_ROOT`；普通联合模型仍使用原来的
+`TESOLLO_VTDEX_REPO_ROOT` 与 `TESOLLO_VTDEX_MODEL_ID`。这些覆盖对四个 VTDex 任务都有效。
 
 先做单环境相机与接触 smoke test：
 

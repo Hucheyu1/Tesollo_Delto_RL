@@ -149,7 +149,7 @@ class TesolloDeltoVTDexPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Asymmetric PPO for the VTDex reorient_down reproduction."""
 
     num_steps_per_env = 32
-    max_iterations = 5100
+    max_iterations = 10000
     save_interval = 250
     experiment_name = "TesolloDelto_vtdex"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
@@ -188,7 +188,7 @@ class TesolloDeltoVTDexReorientUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Asymmetric PPO matching the source reorient_up training schedule."""
 
     num_steps_per_env = 32
-    max_iterations = 5100
+    max_iterations = 10000
     save_interval = 200
     experiment_name = "TesolloDelto_vtdex_reorient_up"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
