@@ -54,7 +54,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     episode_length_s = 10.0
     # The source task cycles through ten different objects, so environments
     # must own independent physics trees instead of cloning env_0.
-    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=0.75, replicate_physics=False)
+    scene: InteractiveSceneCfg = InteractiveSceneCfg(num_envs=10, env_spacing=1.0, replicate_physics=False)
     sim: SimulationCfg = SimulationCfg(
         dt=1.0 / 120.0,
         render_interval=2,
@@ -79,7 +79,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         # palm rather than beyond the fingertips; the Z offset preserves a
         # collision-free gap for all ten source objects.
         init_state=TESOLLO_CFG.init_state.replace(
-            pos=(-0.15, 0.022, 0.44),
+            pos=(-0.13, 0.022, 0.45),
             rot=(0.7071068, 0.0, 0.7071068, 0.0),
         ),
     )
@@ -228,7 +228,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
         prim_path="/World/envs/env_.*/VTDexCamera",
         offset=CameraCfg.OffsetCfg(
             # An exact look-at pose is assigned after scene initialization.
-            pos=(0.3, 0.3, 0.71),
+            pos=(0.1, -0.4, 0.71),
             rot=(1.0, 0.0, 0.0, 0.0),
             convention="world",
         ),
@@ -247,7 +247,7 @@ class TesolloDeltoVTDexEnvCfg(TesolloDeltoRlEnvCfg):
     )
     # Exact source reorient_down camera after translating the full scene down
     # by 0.29 m: source eye/target=(0.3,0.3,1.0)/(0,0,0.65).
-    vtdex_camera_eye_local = (0.3, 0.3, 0.71)
+    vtdex_camera_eye_local = (0.3, -0.3, 0.71)
     vtdex_camera_target_local = (0.0, 0.0, 0.36)
 
     # Original policy state is proprioception only. Shadow Hand's 48 values
