@@ -182,6 +182,12 @@ class TesolloDeltoVTDexPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         max_grad_norm=1.0,
     )
 
+@configclass
+class TesolloDeltoVTDexPepperPPORunnerCfg(TesolloDeltoVTDexPPORunnerCfg):
+    num_steps_per_env = 32
+    max_iterations = 10000
+    save_interval = 250
+    experiment_name = "TesolloDelto_Pepper_rotate"
 
 @configclass
 class TesolloDeltoVTDexReorientUpPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -231,6 +237,13 @@ class TesolloDeltoVTDexBottleCapPPORunnerCfg(TesolloDeltoVTDexReorientUpPPORunne
     save_interval = 500
     experiment_name = "TesolloDelto_vtdex_bottle_cap"
 
+@configclass
+class TesolloDeltoVTDexPepperCapPPORunnerCfg(TesolloDeltoVTDexBottleCapPPORunnerCfg):
+
+    num_steps_per_env = 32
+    max_iterations = 10000
+    save_interval = 500
+    experiment_name = "TesolloDelto_vtdex_pepper_cap"
 
 @configclass
 class TesolloDeltoVTDexTomatoPPORunnerCfg(RslRlOnPolicyRunnerCfg):

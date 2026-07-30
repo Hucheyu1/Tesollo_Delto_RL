@@ -1,5 +1,4 @@
 # Tesollo Delto RL
-
 这是一个基于 Isaac Lab 的强化学习扩展项目，用于在仿真中训练 Tesollo/Delto DG5F 右手机器人完成灵巧手操作任务。项目当前采用 Direct RL 环境，主要面向手内物体操作，并提供 RSL-RL、RL-Games 和视觉观测相关的脚本与配置。
 
 ## 当前状态
@@ -305,7 +304,7 @@ python scripts/rsl_rl/play.py \
 预训练 checkpoint 较大且由 Git LFS 管理。克隆项目后若该文件仍是 LFS pointer，需要执行 `git lfs pull`。首次训练建议从
 10 个环境开始，以覆盖一轮完整物体集合；扩大规模时建议使用 10 的倍数。
 
-### VTDexManip 瓶盖旋转
+## VTDexManip 瓶盖旋转
 
 `Tesollo-Delto-DG5F-VTDex-Bottle-Cap-Direct-v0` 保留上游 `bottle_cap-vt_all_cls` 的任务结构：
 
@@ -322,16 +321,14 @@ python scripts/rsl_rl/play.py \
 - actor 输入为 `40` 维 DG5F 本体状态 + 冻结预训练特征（`joint` 为 `384` 维，`vision` 为
   `512` 维）；critic 额外使用瓶盖角度/速度、原始 20 路触觉和动作。
 - 正向瓶盖速度只有在至少一个 DG5F 触觉 link 确实接触瓶盖时才产生奖励；碰到瓶身或桌面不会通过该
-  门控。奖励速度由相邻 60 Hz 控制步的实际瓶盖角度差计算，并忽略小于 `1e-4 rad` 的求解器抖动；
-  PhysX 原始关节速度仅用于诊断，避免策略通过关节限位附近的速度尖峰刷奖励。奖励权重继续采用上游
-  数值：累计角度 `0.5`、角速度 `1.0`、指尖高度 shaping `0.5`、成功奖励 `5.0`。瓶盖角度超过
-  `6 rad` 记为成功，超过 `6.15 rad` 结束 episode，最多 500 个 60 Hz 控制步。
+  门控。奖励继续采用上游数值：累计角度 `0.5`、角速度 `1.0`、指尖高度 shaping `0.5`、成功奖励
+  `5.0`。瓶盖角度超过 `6 rad` 记为成功，超过 `6.15 rad` 结束 episode，最多 500 个 60 Hz
+  控制步。
 - `debug_visualization=False`，策略 RGB 中没有手部、瓶子或目标坐标轴；DG5F 独立白色硅胶 tip visual
   仍按 Reorient Down 的方式隐藏，碰撞 link 与触觉不受影响。
 
 上述动力学和初始手型已经改变了 PPO 所面对的 MDP，因此不要续训修改前的 Bottle Cap checkpoint；
 请新建一次训练。TensorBoard 中重点观察 `bottle_cap_angle_rad`、`bottle_cap_angle_max_rad`、
-`bottle_cap_velocity_rad_s`、`bottle_cap_raw_joint_velocity_rad_s`、
 `bottle_cap_positive_rotation_ratio`、`bottle_cap_contact_count` 和 `bottle_cap_success_rate`：
 前 3 项能够区分“偶尔碰一下”与“持续正向拧动”。
 
@@ -358,13 +355,66 @@ python scripts/rsl_rl/train.py \
 
 ```bash
 python scripts/rsl_rl/play.py \
-  --task Tesollo-Delto-DG5F-VTDex-Bottle-Cap-Direct-v0 \
-  --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT> --model joint
+  --task Tesollo-Delto-DG5F-VTDex-Pepper-Cap-Direct-v0 \
+  --num_envs 1 \
+  --checkpoint ./logs/rsl_rl/TesolloDelto_vtdex/2026-07-27_21-52-00/exported/policy.pt \
+  --load_exported_policy \
+  --video \
+  --video_length 500 \
+  --video_view camera \
+  --video_resolution 1920 1080 \
+  --video_distance_scale 1.0 \
+  --headless \
+  --video_view camera
 ```
 
 播放纯视觉 checkpoint 时也必须对应使用 `--model vision`。
 
-### VTDexManip 手内 Reorient Up
+## VTDexManip 桌面胡椒瓶位姿调整
+
+```bash
+python scripts/zero_agent.py \
+  --task Tesollo-Delto-DG5F-VTDex-Pepper-Rotate-Direct-v0 \
+  --num_envs 1 \
+  --camera_view
+```
+
+```bash
+python scripts/rsl_rl/train.py \
+    --task Tesollo-Delto-DG5F-VTDex-Pepper-Rotate-Direct-v0 \
+    --num_envs 64 \
+    --headless \
+    --model joint
+```
+
+纯视觉 V-CLIP 对照训练将最后一项改成 `--model vision`。此时 actor
+观测由 `40 + 384 = 424` 维自动切换为 `40 + 512 = 552` 维，训练日志会写入
+`TesolloDelto_Pepper_rotate_vision`，不会与 joint 模型混用。
+
+## VTDexManip 桌面胡椒瓶瓶盖旋转
+
+```bash
+python scripts/zero_agent.py \
+  --task Tesollo-Delto-DG5F-VTDex-Pepper-Cap-Direct-v0 \
+  --num_envs 1 \
+  --camera_view \
+  --save_camera_frame outputs/vtdex_pepper_cap_camera.png \
+  --headless
+```
+
+```bash
+python scripts/rsl_rl/train.py \
+    --task Tesollo-Delto-DG5F-VTDex-Pepper-Cap-Direct-v0 \
+    --num_envs 64 \
+    --headless \
+    --model joint
+```
+
+纯视觉对照同样使用 `--model vision`，日志目录会自动使用
+`TesolloDelto_vtdex_pepper_cap_vision`。播放对应 checkpoint 时必须传入与训练时一致的
+`--model joint` 或 `--model vision`。
+
+## VTDexManip 手内 Reorient Up
 
 `Tesollo-Delto-DG5F-VTDex-Reorient-Up-Direct-v0` 独立复现上游
 `In-hand Reorientation / reorient_up`，不会覆盖 Tomato 或 Reorient Down：
@@ -408,7 +458,7 @@ python scripts/rsl_rl/play.py \
 若要使用自行预训练的 DG5F VTDex encoder，可在启动前设置
 `TESOLLO_VTDEX_REPO_ROOT` 和 `TESOLLO_VTDEX_MODEL_ID`；未设置时使用项目内置官方模型。
 
-### 保留的番茄 VTDex 任务
+## 保留的番茄 VTDex 任务
 
 之前的番茄位姿调整代码已独立保存在 `tesollo_delto_vtdex_tomato_env.py`，没有被十物体场景覆盖。该任务继续使用
 `robots/tomato.usd`、两个表面方向点、随机目标位置/旋转和 471 维 actor observation。旧任务名和显式任务名均可使用：
@@ -424,7 +474,7 @@ python scripts/rsl_rl/train.py \
   --num_envs 16 --headless
 ```
 
-### 用 DG5F 策略数据重新做 VT-JointPretrain
+## 用 DG5F 策略数据重新做 VT-JointPretrain
 
 项目现已包含一条不覆盖原任务和官方权重的完整流程：用
 `Tesollo-Delto-DG5F-Direct-v0` 的已训练策略采集 224×224 RGB 与 20 路

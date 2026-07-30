@@ -55,6 +55,16 @@ parser.add_argument(
     help="Stop play cleanly after this many policy steps (0 runs until the simulator closes).",
 )
 parser.add_argument(
+    "--load_exported_policy",
+    "--load-exported-policy",
+    action="store_true",
+    default=False,
+    help=(
+        "Load --checkpoint as an exported TorchScript policy.pt with torch.jit.load(). "
+        "This skips RSL-RL runner.load(), critic loading, optimizer loading, and policy re-export."
+    ),
+)
+parser.add_argument(
     "--video_view",
     "--video-view",
     choices=("camera", "viewer"),
@@ -62,6 +72,52 @@ parser.add_argument(
     help=(
         "Viewpoint used by --video. 'camera' records from the configured student camera pose when available; "
         "'viewer' keeps the task's default viewer pose."
+    ),
+)
+parser.add_argument(
+    "--video_resolution",
+    "--video-resolution",
+    type=int,
+    nargs=2,
+    default=None,
+    metavar=("WIDTH", "HEIGHT"),
+    help=(
+        "Override the recorded viewer/video resolution. Example: --video_resolution 1920 1080. "
+        "This affects the RecordVideo render output, not the policy camera tensor."
+    ),
+)
+parser.add_argument(
+    "--video_distance_scale",
+    "--video-distance-scale",
+    type=float,
+    default=1.0,
+    help=(
+        "When --video_view camera is used, multiply the vector from lookat to eye by this value. "
+        "Use >1.0 to move the recording view farther away and include a larger scene."
+    ),
+)
+parser.add_argument(
+    "--video_eye_offset",
+    "--video-eye-offset",
+    type=float,
+    nargs=3,
+    default=(0.0, 0.0, 0.0),
+    metavar=("DX", "DY", "DZ"),
+    help=(
+        "Additional env-local offset added to the recording viewer eye after distance scaling. "
+        "Useful for shifting the recorded view left/right/up/down without changing the policy camera."
+    ),
+)
+parser.add_argument(
+    "--video_lookat_offset",
+    "--video-lookat-offset",
+    type=float,
+    nargs=3,
+    default=(0.0, 0.0, 0.0),
+    metavar=("DX", "DY", "DZ"),
+    help=(
+        "Additional env-local offset added to the recording viewer lookat point. "
+        "Useful for centering the object/hand in a wider recorded video."
     ),
 )
 parser.add_argument(
@@ -113,6 +169,10 @@ AppLauncher.add_app_launcher_args(parser)
 args_cli, hydra_args = parser.parse_known_args()
 if args_cli.max_steps < 0:
     parser.error("--max_steps must be non-negative")
+if args_cli.video_resolution is not None and (args_cli.video_resolution[0] <= 0 or args_cli.video_resolution[1] <= 0):
+    parser.error("--video_resolution WIDTH HEIGHT must be positive")
+if args_cli.video_distance_scale <= 0.0:
+    parser.error("--video_distance_scale must be positive")
 # Visual tasks require RTX camera rendering even without video output.
 if args_cli.video or (
     args_cli.task is not None and any(tag in args_cli.task for tag in ("Distill", "VTDex"))
@@ -174,6 +234,18 @@ def _as_tuple3(value) -> tuple[float, float, float]:
     return tuple(float(x) for x in value)
 
 
+def _tuple3_add(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (a[0] + b[0], a[1] + b[1], a[2] + b[2])
+
+
+def _tuple3_sub(a: tuple[float, float, float], b: tuple[float, float, float]) -> tuple[float, float, float]:
+    return (a[0] - b[0], a[1] - b[1], a[2] - b[2])
+
+
+def _tuple3_scale(a: tuple[float, float, float], scale: float) -> tuple[float, float, float]:
+    return (a[0] * scale, a[1] * scale, a[2] * scale)
+
+
 def _configure_video_camera_view(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
     """Use the configured camera position as the viewport recording view."""
 
@@ -195,16 +267,108 @@ def _configure_video_camera_view(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg 
         object_init_state = getattr(object_cfg, "init_state", None)
         camera_lookat = _as_tuple3(getattr(object_init_state, "pos", (0.10, 0.0, 0.50)))
 
+    # Keep the policy/sensor camera unchanged. Only move the viewer used by RecordVideo.
+    lookat_offset = _as_tuple3(args_cli.video_lookat_offset)
+    eye_offset = _as_tuple3(args_cli.video_eye_offset)
+    camera_lookat = _tuple3_add(camera_lookat, lookat_offset)
+    view_vector = _tuple3_sub(camera_pos, camera_lookat)
+    camera_pos = _tuple3_add(
+        camera_lookat,
+        _tuple3_scale(view_vector, float(args_cli.video_distance_scale)),
+    )
+    camera_pos = _tuple3_add(camera_pos, eye_offset)
+
     env_cfg.viewer.origin_type = "env"
     env_cfg.viewer.env_index = 0
     env_cfg.viewer.eye = camera_pos
     env_cfg.viewer.lookat = camera_lookat
-    if hasattr(camera_cfg, "width") and hasattr(camera_cfg, "height"):
+    if args_cli.video_resolution is not None:
+        env_cfg.viewer.resolution = (int(args_cli.video_resolution[0]), int(args_cli.video_resolution[1]))
+    elif hasattr(camera_cfg, "width") and hasattr(camera_cfg, "height"):
         env_cfg.viewer.resolution = (int(camera_cfg.width), int(camera_cfg.height))
 
     print(
         "[INFO] Recording play video from configured camera view: "
-        f"eye={env_cfg.viewer.eye}, lookat={env_cfg.viewer.lookat}, resolution={env_cfg.viewer.resolution}"
+        f"eye={env_cfg.viewer.eye}, lookat={env_cfg.viewer.lookat}, resolution={env_cfg.viewer.resolution}, "
+        f"distance_scale={args_cli.video_distance_scale}"
+    )
+
+
+def _apply_video_resolution_override(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg) -> None:
+    """Apply --video_resolution even when --video_view viewer keeps the default viewer pose."""
+
+    if args_cli.video_resolution is None:
+        return
+    env_cfg.viewer.resolution = (int(args_cli.video_resolution[0]), int(args_cli.video_resolution[1]))
+    print(f"[INFO] Recording play video resolution overridden to {env_cfg.viewer.resolution}")
+
+
+class _ExportedJitPolicy:
+    """Adapter so an exported TorchScript actor behaves like an RSL-RL inference policy.
+
+    RSL-RL/Isaac-Lab environments may return either a plain tensor or a TensorDict-like
+    object with keys such as "policy" and "critic".  The exported policy.pt is a
+    TorchScript actor and expects only the policy observation tensor, so this adapter
+    extracts that tensor only for the exported-policy path.  The normal checkpoint path
+    still uses runner.get_inference_policy() unchanged.
+    """
+
+    def __init__(self, module: torch.jit.ScriptModule):
+        self.module = module
+
+    @staticmethod
+    def _extract_policy_obs(obs):
+        if isinstance(obs, torch.Tensor):
+            return obs
+
+        # TensorDict and dict both support key lookup.  Prefer the actor/policy
+        # observation and ignore privileged critic/state entries.
+        for key in ("policy", "obs", "student", "actor"):
+            try:
+                if key in obs:
+                    value = obs[key]
+                    if isinstance(value, torch.Tensor):
+                        return value
+            except Exception:
+                pass
+
+        # Some wrappers expose a get() method but not reliable membership checks.
+        get_fn = getattr(obs, "get", None)
+        if callable(get_fn):
+            for key in ("policy", "obs", "student", "actor"):
+                try:
+                    value = get_fn(key)
+                except Exception:
+                    continue
+                if isinstance(value, torch.Tensor):
+                    return value
+
+        # Last-resort diagnostic: show available keys to make shape/key mistakes
+        # obvious instead of letting TorchScript fail with a TensorDict dispatch error.
+        try:
+            keys = list(obs.keys())
+        except Exception:
+            keys = f"unavailable for type {type(obs)!r}"
+        raise TypeError(
+            "Exported TorchScript policy expects a torch.Tensor observation, but play.py received "
+            f"{type(obs)!r}. Could not find a tensor under keys policy/obs/student/actor; keys={keys}."
+        )
+
+    def __call__(self, obs):
+        policy_obs = self._extract_policy_obs(obs)
+        return self.module(policy_obs)
+
+    def reset(self, dones=None):
+        # Exported feed-forward actor has no recurrent state. Keep this method so
+        # the original play loop can call policy.reset(dones) unchanged.
+        return None
+
+
+def _is_exported_policy_path(path: str) -> bool:
+    normalized = os.path.normpath(str(path))
+    return normalized.endswith(os.path.join("exported", "policy.pt")) or os.path.basename(normalized) in (
+        "policy.pt",
+        "policy.jit.pt",
     )
 
 
@@ -239,6 +403,7 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     if args_cli.video:
         if args_cli.video_view == "camera":
             _configure_video_camera_view(env_cfg)
+        _apply_video_resolution_override(env_cfg)
         if not args_cli.hide_video_markers:
             if hasattr(env_cfg, "debug_visualization"):
                 env_cfg.debug_visualization = True
@@ -308,46 +473,57 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # wrap around environment for rsl-rl
     env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
 
-    print(f"[INFO]: Loading model checkpoint from: {resume_path}")
-    # load previously trained model
-    if agent_cfg.class_name == "OnPolicyRunner":
-        runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
-    elif agent_cfg.class_name == "DistillationRunner":
-        runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+    load_exported_policy = bool(args_cli.load_exported_policy) or _is_exported_policy_path(resume_path)
+
+    if load_exported_policy:
+        print(f"[INFO]: Loading exported TorchScript policy from: {resume_path}")
+        policy_module = torch.jit.load(resume_path, map_location=env.unwrapped.device)
+        policy_module.eval()
+        policy = _ExportedJitPolicy(policy_module)
+        # Keep the rest of the original play loop unchanged.  Exported policies are
+        # inference-only, so there is no runner, critic, optimizer, or re-export.
+        print("[INFO]: Exported policy loaded; skipped RSL-RL runner.load(), critic loading, and policy export.")
     else:
-        raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-    # convert pre-5.0 published checkpoints to the layout expected by rsl-rl >= 5.0 (no-op otherwise)
-    resume_path = handle_deprecated_rsl_rl_checkpoint(resume_path, installed_version)
-    runner.load(resume_path)
-
-    # obtain the trained policy for inference
-    policy = runner.get_inference_policy(device=env.unwrapped.device)
-
-    # export the trained policy to JIT and ONNX formats
-    export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
-
-    if version.parse(installed_version) >= version.parse("4.0.0"):
-        # use the new export functions for rsl-rl >= 4.0.0
-        runner.export_policy_to_jit(path=export_model_dir, filename="policy.pt")
-        runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
-    else:
-        # extract the neural network for rsl-rl < 4.0.0
-        if version.parse(installed_version) >= version.parse("2.3.0"):
-            policy_nn = runner.alg.policy
+        print(f"[INFO]: Loading model checkpoint from: {resume_path}")
+        # load previously trained model
+        if agent_cfg.class_name == "OnPolicyRunner":
+            runner = OnPolicyRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
+        elif agent_cfg.class_name == "DistillationRunner":
+            runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=None, device=agent_cfg.device)
         else:
-            policy_nn = runner.alg.actor_critic
+            raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
+        # convert pre-5.0 published checkpoints to the layout expected by rsl-rl >= 5.0 (no-op otherwise)
+        resume_path = handle_deprecated_rsl_rl_checkpoint(resume_path, installed_version)
+        runner.load(resume_path)
 
-        # extract the normalizer
-        if hasattr(policy_nn, "actor_obs_normalizer"):
-            normalizer = policy_nn.actor_obs_normalizer
-        elif hasattr(policy_nn, "student_obs_normalizer"):
-            normalizer = policy_nn.student_obs_normalizer
+        # obtain the trained policy for inference
+        policy = runner.get_inference_policy(device=env.unwrapped.device)
+
+        # export the trained policy to JIT and ONNX formats
+        export_model_dir = os.path.join(os.path.dirname(resume_path), "exported")
+
+        if version.parse(installed_version) >= version.parse("4.0.0"):
+            # use the new export functions for rsl-rl >= 4.0.0
+            runner.export_policy_to_jit(path=export_model_dir, filename="policy.pt")
+            runner.export_policy_to_onnx(path=export_model_dir, filename="policy.onnx")
         else:
-            normalizer = None
+            # extract the neural network for rsl-rl < 4.0.0
+            if version.parse(installed_version) >= version.parse("2.3.0"):
+                policy_nn = runner.alg.policy
+            else:
+                policy_nn = runner.alg.actor_critic
 
-        # export to JIT and ONNX
-        export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
-        export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
+            # extract the normalizer
+            if hasattr(policy_nn, "actor_obs_normalizer"):
+                normalizer = policy_nn.actor_obs_normalizer
+            elif hasattr(policy_nn, "student_obs_normalizer"):
+                normalizer = policy_nn.student_obs_normalizer
+            else:
+                normalizer = None
+
+            # export to JIT and ONNX
+            export_policy_as_jit(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.pt")
+            export_policy_as_onnx(policy_nn, normalizer=normalizer, path=export_model_dir, filename="policy.onnx")
 
     dt = env.unwrapped.step_dt
 
@@ -387,7 +563,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
                     evaluation_policy_tactile_ratio_sum += float(policy_tactile_ratio)
                     evaluation_tactile_steps += 1
             # reset recurrent states for episodes that have terminated
-            if version.parse(installed_version) >= version.parse("4.0.0"):
+            if load_exported_policy:
+                policy.reset(dones)
+            elif version.parse(installed_version) >= version.parse("4.0.0"):
                 policy.reset(dones)
             else:
                 policy_nn.reset(dones)

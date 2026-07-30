@@ -84,20 +84,6 @@ gym.register(
     },
 )
 
-gym.register(
-    id="Tesollo-Delto-DG5F-VTDex-Direct-v0",
-    entry_point=f"{__name__}.tesollo_delto_vtdex_tomato_env:TesolloDeltoVTDexTomatoEnv",
-    disable_env_checker=True,
-    kwargs={
-        "env_cfg_entry_point": (
-            f"{__name__}.tesollo_delto_vtdex_tomato_env:TesolloDeltoVTDexTomatoEnvCfg"
-        ),
-        "rsl_rl_cfg_entry_point": (
-            f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexTomatoPPORunnerCfg"
-        ),
-    },
-)
-
 # Explicit name for the preserved tomato task. The shorter ID above remains a
 # compatibility alias for old tomato checkpoints and launch scripts.
 gym.register(
@@ -122,6 +108,16 @@ gym.register(
     kwargs={
         "env_cfg_entry_point": f"{__name__}.tesollo_delto_vtdex_env:TesolloDeltoVTDexEnvCfg",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexPPORunnerCfg",
+    },
+)
+
+gym.register(
+    id="Tesollo-Delto-DG5F-VTDex-Pepper-Rotate-Direct-v0",
+    entry_point=(f"{__name__}.tesollo_delto_pepper_bottle_rotate_env:TesolloDeltoPepperBottleRotateEnv"),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (f"{__name__}.tesollo_delto_pepper_bottle_rotate_env:TesolloDeltoPepperBottleRotateEnvCfg"),
+        "rsl_rl_cfg_entry_point": (f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexPepperPPORunnerCfg"),
     },
 )
 
@@ -163,5 +159,15 @@ gym.register(
             f"{agents.__name__}.rsl_rl_ppo_cfg:"
             "TesolloDeltoVTDexBottleCapPPORunnerCfg"
         ),
+    },
+)
+
+gym.register(
+    id="Tesollo-Delto-DG5F-VTDex-Pepper-Cap-Direct-v0",
+    entry_point=(f"{__name__}.tesollo_delto_pepper_bottle_cap_env:TesolloDeltoPepperBottleCapEnv"),
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": (f"{__name__}.tesollo_delto_pepper_bottle_cap_env:TesolloDeltoPepperBottleCapEnvCfg"),
+        "rsl_rl_cfg_entry_point": (f"{agents.__name__}.rsl_rl_ppo_cfg:TesolloDeltoVTDexPepperCapPPORunnerCfg"),
     },
 )
