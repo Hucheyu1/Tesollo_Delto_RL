@@ -322,14 +322,16 @@ python scripts/rsl_rl/play.py \
 - actor 输入为 `40` 维 DG5F 本体状态 + 冻结预训练特征（`joint` 为 `384` 维，`vision` 为
   `512` 维）；critic 额外使用瓶盖角度/速度、原始 20 路触觉和动作。
 - 正向瓶盖速度只有在至少一个 DG5F 触觉 link 确实接触瓶盖时才产生奖励；碰到瓶身或桌面不会通过该
-  门控。奖励继续采用上游数值：累计角度 `0.5`、角速度 `1.0`、指尖高度 shaping `0.5`、成功奖励
-  `5.0`。瓶盖角度超过 `6 rad` 记为成功，超过 `6.15 rad` 结束 episode，最多 500 个 60 Hz
-  控制步。
+  门控。奖励速度由相邻 60 Hz 控制步的实际瓶盖角度差计算，并忽略小于 `1e-4 rad` 的求解器抖动；
+  PhysX 原始关节速度仅用于诊断，避免策略通过关节限位附近的速度尖峰刷奖励。奖励权重继续采用上游
+  数值：累计角度 `0.5`、角速度 `1.0`、指尖高度 shaping `0.5`、成功奖励 `5.0`。瓶盖角度超过
+  `6 rad` 记为成功，超过 `6.15 rad` 结束 episode，最多 500 个 60 Hz 控制步。
 - `debug_visualization=False`，策略 RGB 中没有手部、瓶子或目标坐标轴；DG5F 独立白色硅胶 tip visual
   仍按 Reorient Down 的方式隐藏，碰撞 link 与触觉不受影响。
 
 上述动力学和初始手型已经改变了 PPO 所面对的 MDP，因此不要续训修改前的 Bottle Cap checkpoint；
 请新建一次训练。TensorBoard 中重点观察 `bottle_cap_angle_rad`、`bottle_cap_angle_max_rad`、
+`bottle_cap_velocity_rad_s`、`bottle_cap_raw_joint_velocity_rad_s`、
 `bottle_cap_positive_rotation_ratio`、`bottle_cap_contact_count` 和 `bottle_cap_success_rate`：
 前 3 项能够区分“偶尔碰一下”与“持续正向拧动”。
 

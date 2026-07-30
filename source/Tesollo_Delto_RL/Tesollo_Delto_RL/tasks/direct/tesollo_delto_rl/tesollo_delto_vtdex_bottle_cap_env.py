@@ -83,6 +83,21 @@ class TesolloDeltoVTDexBottleCapEnvCfg(TesolloDeltoVTDexEnvCfg):
             # setup while retaining clearance for all ten cap geometries.
             pos=(-0.13, 0.022, 0.55),
             rot=(0.7071068, 0.0, 0.7071068, 0.0),
+            joint_pos={
+                "rj_dg_(1|3)_1": 0.0,
+                "rj_dg_1_2": -1.57,
+                "rj_dg_1_3": -0.8,
+                "rj_dg_1_4": 1.4,
+                "rj_dg_2_1": -0.2,
+                "rj_dg_4_1": 0.2,
+                "rj_dg_(2|3|4)_2": 1.3,
+                "rj_dg_(2|3|4)_3": 0.2,
+                "rj_dg_(2|3|4)_4": 0.2,
+                "rj_dg_5_1": 0.3,
+                "rj_dg_5_2": 1.57,
+                "rj_dg_5_3": 1.57,
+                "rj_dg_5_4": 0.0,
+            },
         ),
         actuators={"fingers": _BOTTLE_FINGER_ACTUATOR_CFG},
     )
@@ -92,27 +107,53 @@ class TesolloDeltoVTDexBottleCapEnvCfg(TesolloDeltoVTDexEnvCfg):
     # so exploration can generate tangential torque from the first episode.
     # Values follow the layer-major ``actuated_joint_names`` order.
     hand_position = [
-        0.10,
-        0.08,
-        0.00,
-        -0.08,
-        0.00,
-        -1.05,
-        0.45,
-        0.45,
-        0.45,
-        0.15,
-        -0.20,
-        0.50,
-        0.50,
-        0.50,
-        0.50,
-        0.15,
-        0.50,
-        0.50,
-        0.50,
-        0.55,
+        # 第一关节：rj_dg_1_1 ~ rj_dg_5_1
+        0.0,
+        -0.2,
+        0.0,
+        0.2,
+        0.3,
+        # 第二关节：rj_dg_1_2 ~ rj_dg_5_2
+        -1.57,
+        1.3,
+        1.3,
+        1.3,
+        1.57,
+        # 第三关节：rj_dg_1_3 ~ rj_dg_5_3
+        -0.8,
+        0.2,
+        0.2,
+        0.2,
+        1.57,
+        # 第四关节：rj_dg_1_4 ~ rj_dg_5_4
+        1.4,
+        0.2,
+        0.2,
+        0.2,
+        0.0,
     ]
+    # Bottle-cap-specific limits. Keep the verified Reorient Down ranges as
+    # the baseline, then add a small amount of room for closing, releasing and
+    # regrasping the cap. The DG5F asset's physical limits remain the final
+    # hard constraint.
+    hand_lower_limits = list(_DOWN_CFG.hand_lower_limits)
+    # Little-finger second joint: retain some outward motion around its 90 deg
+    # pregrasp while expanding the inherited -15 deg lower range slightly.
+    hand_lower_limits[9] = -25
+    # Permit slight extension at the four non-thumb middle joints and at all
+    # five distal joints.
+    hand_lower_limits[11:15] = [-10, -10, -10, -10]
+    hand_lower_limits[15:20] = [-10, -10, -10, -10, -10]
+
+    hand_upper_limits = list(_DOWN_CFG.hand_upper_limits)
+    # Give ring abduction and little-finger base motion another 5--10 degrees.
+    hand_upper_limits[3] = 20
+    hand_upper_limits[4] = 55
+    # Increase index/middle/ring proximal flexion from 90 to 100 degrees.
+    hand_upper_limits[6:9] = [100, 100, 100]
+    # The current cap pregrasp requests rj_dg_5_2=1.57 rad (90 deg);
+    # this is its physical upper limit and must not be expanded further.
+    hand_upper_limits[9] = 90
 
     # Each copied URDF contains a fixed bottle_body and one passive revolute
     # bottle_cap_joint. Assets are spawned manually per environment, then
@@ -166,6 +207,9 @@ class TesolloDeltoVTDexBottleCapEnvCfg(TesolloDeltoVTDexEnvCfg):
     cap_reset_angle = 6.15
     cap_success_bonus = 5.0
     cap_joint_upper_limit = 6.28
+    # Ignore sub-0.1 mrad solver jitter when deriving velocity from the actual
+    # angle displacement between two 60 Hz policy steps.
+    cap_progress_deadband_rad = 1.0e-4
 
     # VTDexManip uses 1.0. Use a task-local 0.5 compromise: twice the previous
     # response while the remaining low-pass action still limits impact spikes.
@@ -186,8 +230,15 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
     cfg: TesolloDeltoVTDexBottleCapEnvCfg
 
     def __init__(self, cfg: TesolloDeltoVTDexBottleCapEnvCfg, render_mode: str | None = None, **kwargs):
+        if float(cfg.cap_progress_deadband_rad) < 0.0:
+            raise ValueError("cap_progress_deadband_rad must be non-negative")
         super().__init__(cfg, render_mode, **kwargs)
         self._resolve_bottle_indices()
+        self._compute_intermediate_values()
+        # PhysX joint velocity can contain large contact/limit impulses even
+        # when the cap angle does not move. Reward the finite-difference
+        # velocity instead and synchronize this buffer on every reset.
+        self._previous_cap_joint_pos = self.cap_joint_pos.clone()
         if self._bottle_cap_contact_sensor.num_bodies != 1:
             raise RuntimeError(
                 "Bottle-cap ContactSensor must resolve exactly one body; "
@@ -364,7 +415,18 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
             self.cap_joint_pos,
             torch.tensor(7.0, dtype=torch.float32, device=self.device),
         )
-        cap_velocity_reward = torch.clamp(self.cap_joint_vel, -10.0, 10.0)
+        cap_angle_delta = self.cap_joint_pos - self._previous_cap_joint_pos
+        cap_angle_delta = torch.where(
+            torch.abs(cap_angle_delta) < float(self.cfg.cap_progress_deadband_rad),
+            torch.zeros_like(cap_angle_delta),
+            cap_angle_delta,
+        )
+        cap_progress_velocity = torch.clamp(
+            cap_angle_delta / float(self.step_dt),
+            -10.0,
+            10.0,
+        )
+        cap_velocity_reward = cap_progress_velocity
         cap_contact_counts = self._cap_contact_counts()
         valid_cap_contact = cap_contact_counts >= int(self.cfg.min_cap_contacts)
         # Preserve the source asymmetry: positive opening velocity needs valid
@@ -405,12 +467,30 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
                 "bottle_cap_angle_rad": self.cap_joint_pos.mean(),
                 "bottle_cap_angle_deg": torch.rad2deg(self.cap_joint_pos).mean(),
                 "bottle_cap_angle_max_rad": self.cap_joint_pos.max(),
-                "bottle_cap_velocity_rad_s": self.cap_joint_vel.mean(),
+                # Keep the established key for the effective velocity that is
+                # now used by the reward, and expose raw PhysX velocity
+                # separately for detecting contact/limit impulses.
+                "bottle_cap_velocity_rad_s": cap_progress_velocity.mean(),
+                "bottle_cap_reward_velocity_rad_s": cap_velocity_reward.mean(),
+                "bottle_cap_raw_joint_velocity_rad_s": self.cap_joint_vel.mean(),
+                "bottle_cap_angle_delta_abs_rad": torch.abs(cap_angle_delta).mean(),
                 "bottle_cap_contact_count": cap_contact_counts.float().mean(),
-                "bottle_cap_positive_rotation_ratio": ((self.cap_joint_vel > 0.0) & valid_cap_contact).float().mean(),
+                "bottle_cap_position_reward_term": (
+                    cap_pos_reward * float(self.cfg.cap_position_reward_scale)
+                ).mean(),
+                "bottle_cap_velocity_reward_term": (
+                    cap_velocity_reward * float(self.cfg.cap_velocity_reward_scale)
+                ).mean(),
+                "bottle_cap_height_reward_term": (
+                    fingertip_height_reward * float(self.cfg.fingertip_height_reward_scale)
+                ).mean(),
+                "bottle_cap_positive_rotation_ratio": (
+                    (cap_progress_velocity > 0.0) & valid_cap_contact
+                ).float().mean(),
                 "bottle_cap_success_rate": success.float().mean(),
             }
         )
+        self._previous_cap_joint_pos.copy_(self.cap_joint_pos)
         return reward
 
     def _get_dones(self) -> tuple[torch.Tensor, torch.Tensor]:
@@ -492,3 +572,7 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
         self.reset_goal_buf[env_ids_tensor] = False
         self._hide_goal_marker()
         self._compute_intermediate_values()
+        if hasattr(self, "_previous_cap_joint_pos"):
+            # Prevent the successful/timeout reset from appearing as one large
+            # negative angle displacement on the first step of a new episode.
+            self._previous_cap_joint_pos[env_ids_tensor] = self.cap_joint_pos[env_ids_tensor]
