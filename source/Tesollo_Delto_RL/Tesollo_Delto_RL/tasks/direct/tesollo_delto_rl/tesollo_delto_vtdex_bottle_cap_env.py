@@ -60,6 +60,12 @@ _SOURCE_HAND_HEIGHTS = (
     0.2259636,
 )
 _DOWN_CFG = TesolloDeltoVTDexEnvCfg()
+_BOTTLE_FINGER_ACTUATOR_CFG = _DOWN_CFG.robot_cfg.actuators["fingers"].replace(
+    # The shared DG5F limit (0.1 N m) is suitable for free-space motion but is
+    # far below the 0.7245--2.3722 N m Shadow-Hand limits used by VTDexManip.
+    # Keep the source-like 0.8 N m override local to this contact-heavy task.
+    effort_limit_sim=2.0
+)
 
 
 @configclass
@@ -73,10 +79,40 @@ class TesolloDeltoVTDexBottleCapEnvCfg(TesolloDeltoVTDexEnvCfg):
     # follows the source task's ten object-specific hand heights.
     robot_cfg = _DOWN_CFG.robot_cfg.replace(
         init_state=_DOWN_CFG.robot_cfg.init_state.replace(
-            pos=(-0.13, 0.022, 0.57),
+            # Bring the palm 2 cm closer than the previous hover-dominated
+            # setup while retaining clearance for all ten cap geometries.
+            pos=(-0.13, 0.022, 0.55),
             rot=(0.7071068, 0.0, 0.7071068, 0.0),
-        )
+        ),
+        actuators={"fingers": _BOTTLE_FINGER_ACTUATOR_CFG},
     )
+
+    # Cap-specific multi-finger pregrasp. Reorient Down intentionally starts
+    # open above a table object; a bottle cap instead needs a light enclosure
+    # so exploration can generate tangential torque from the first episode.
+    # Values follow the layer-major ``actuated_joint_names`` order.
+    hand_position = [
+        0.10,
+        0.08,
+        0.00,
+        -0.08,
+        0.00,
+        -1.05,
+        0.45,
+        0.45,
+        0.45,
+        0.15,
+        -0.20,
+        0.50,
+        0.50,
+        0.50,
+        0.50,
+        0.15,
+        0.50,
+        0.50,
+        0.50,
+        0.55,
+    ]
 
     # Each copied URDF contains a fixed bottle_body and one passive revolute
     # bottle_cap_joint. Assets are spawned manually per environment, then
@@ -111,12 +147,15 @@ class TesolloDeltoVTDexBottleCapEnvCfg(TesolloDeltoVTDexEnvCfg):
     vtdex_camera_eye_local = _DOWN_CFG.vtdex_camera_eye_local
     vtdex_camera_target_local = (0.0, 0.02, 0.46)
 
-    # Actor layout stays qpos(20) + qvel(20) + VTDex CLS(384). The critic sees
-    # qpos/qvel, cap angle/velocity, 20 raw tactile bits and the previous action.
+    # Default joint-mode actor layout is qpos(20) + qvel(20) + VTDex CLS(384);
+    # ``--model vision`` changes only the feature/observation dimension to 512.
+    # The critic sees qpos/qvel, cap angle/velocity, 20 raw tactile bits and the
+    # previous action in either mode.
     observation_space = 424
     state_space = 82
 
-    # Original bottle_cap.yaml reward and success settings.
+    # Preserve the source task's reward weights, contact gate and success
+    # thresholds while testing the DG5F-specific physical corrections.
     min_cap_contacts = 1
     cap_contact_threshold = 0.01
     cap_position_reward_scale = 0.5
@@ -128,10 +167,9 @@ class TesolloDeltoVTDexBottleCapEnvCfg(TesolloDeltoVTDexEnvCfg):
     cap_success_bonus = 5.0
     cap_joint_upper_limit = 6.28
 
-    # VTDexManip uses actionsMovingAverage=1.0. The DG5F adaptation retains the
-    # verified Reorient Down value (0.2) because its direct-drive joints can
-    # otherwise strike the much smaller cap in one 60 Hz action.
-    act_moving_average = _DOWN_CFG.act_moving_average
+    # VTDexManip uses 1.0. Use a task-local 0.5 compromise: twice the previous
+    # response while the remaining low-pass action still limits impact spikes.
+    act_moving_average = 0.8
     # Keep bottle_cap.yaml's reset distribution around the Reorient Down
     # pregrasp: the fixed bottle pose has no noise, while the hand root and
     # joints receive the source task's small reset perturbations.
@@ -165,6 +203,12 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
             "[INFO]: Bottle-cap contact filter: "
             f"cap body={self.object.body_names[self._bottle_cap_body_id]}, "
             f"DG5F links={force_matrix_w.shape[2]}"
+        )
+        print(
+            "[INFO]: Bottle-cap DG5F tuning: "
+            f"effort_limit={self.cfg.robot_cfg.actuators['fingers'].effort_limit_sim} N m, "
+            f"action_moving_average={self.cfg.act_moving_average}, "
+            f"hand_root_z={self.cfg.robot_cfg.init_state.pos[2]} m"
         )
 
     def _setup_scene(self):
@@ -359,8 +403,11 @@ class TesolloDeltoVTDexBottleCapEnv(TesolloDeltoVTDexEnv):
         self.extras.setdefault("log", {}).update(
             {
                 "bottle_cap_angle_rad": self.cap_joint_pos.mean(),
+                "bottle_cap_angle_deg": torch.rad2deg(self.cap_joint_pos).mean(),
+                "bottle_cap_angle_max_rad": self.cap_joint_pos.max(),
                 "bottle_cap_velocity_rad_s": self.cap_joint_vel.mean(),
                 "bottle_cap_contact_count": cap_contact_counts.float().mean(),
+                "bottle_cap_positive_rotation_ratio": ((self.cap_joint_vel > 0.0) & valid_cap_contact).float().mean(),
                 "bottle_cap_success_rate": success.float().mean(),
             }
         )

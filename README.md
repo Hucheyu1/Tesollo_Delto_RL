@@ -313,14 +313,25 @@ python scripts/rsl_rl/play.py \
   `vtdex_pretrained/`，运行时不依赖外部 VTDexManip 仓库。
 - 瓶身固定且关闭重力，瓶盖是绕世界 Z 轴、范围 `0～6.28 rad` 的被动 revolute joint；策略需要通过
   DG5F 接触推动瓶盖正向旋转。
-- DG5F 的掌心朝下姿态、X/Y 对齐、初始关节值、关节限位和相机 eye 沿用 Reorient Down；手根 Z
-  根据 10 个瓶子的上游高度逐个调整，相机 look-at 抬高到瓶盖区域。
-- actor 输入仍为 `40` 维 DG5F 本体状态 + `384` 维 VTDex CLS；critic 额外使用瓶盖角度/速度、原始
-  20 路触觉和动作。
+- DG5F 的掌心朝下姿态、X/Y 对齐、关节限位和相机 eye 沿用 Reorient Down；瓶盖任务单独使用环绕瓶盖的
+  轻预抓取手型，并将手根基准高度设为 `0.55 m`。其余 9 个瓶子的手高只保留上游数据中的相对差值，
+  相机 look-at 抬高到瓶盖区域。
+- Bottle Cap 单独把 DG5F 仿真力矩上限从共享配置的 `0.1 N·m` 提高到 `0.8 N·m`，接近上游
+  Shadow Hand 执行器的最低量级；动作移动平均系数由 `0.2` 提高为 `0.5`，瓶盖摩擦系数显式设为
+  `1.0`。这些设置只对 Bottle Cap 生效，不会改变 Down、Up 或 Tomato。
+- actor 输入为 `40` 维 DG5F 本体状态 + 冻结预训练特征（`joint` 为 `384` 维，`vision` 为
+  `512` 维）；critic 额外使用瓶盖角度/速度、原始 20 路触觉和动作。
 - 正向瓶盖速度只有在至少一个 DG5F 触觉 link 确实接触瓶盖时才产生奖励；碰到瓶身或桌面不会通过该
-  门控。瓶盖角度超过 `6 rad` 记为成功，超过 `6.15 rad` 结束 episode，最多 500 个 60 Hz 控制步。
+  门控。奖励继续采用上游数值：累计角度 `0.5`、角速度 `1.0`、指尖高度 shaping `0.5`、成功奖励
+  `5.0`。瓶盖角度超过 `6 rad` 记为成功，超过 `6.15 rad` 结束 episode，最多 500 个 60 Hz
+  控制步。
 - `debug_visualization=False`，策略 RGB 中没有手部、瓶子或目标坐标轴；DG5F 独立白色硅胶 tip visual
   仍按 Reorient Down 的方式隐藏，碰撞 link 与触觉不受影响。
+
+上述动力学和初始手型已经改变了 PPO 所面对的 MDP，因此不要续训修改前的 Bottle Cap checkpoint；
+请新建一次训练。TensorBoard 中重点观察 `bottle_cap_angle_rad`、`bottle_cap_angle_max_rad`、
+`bottle_cap_positive_rotation_ratio`、`bottle_cap_contact_count` 和 `bottle_cap_success_rate`：
+前 3 项能够区分“偶尔碰一下”与“持续正向拧动”。
 
 先保存一帧策略相机图像并做零动作检查：
 
@@ -336,16 +347,20 @@ python scripts/zero_agent.py \
 ```bash
 python scripts/rsl_rl/train.py \
   --task Tesollo-Delto-DG5F-VTDex-Bottle-Cap-Direct-v0 \
-  --num_envs 10 --headless
+  --num_envs 10 --headless --model joint
 ```
+
+纯视觉对照训练时只需将最后一项改成 `--model vision`。
 
 播放：
 
 ```bash
 python scripts/rsl_rl/play.py \
   --task Tesollo-Delto-DG5F-VTDex-Bottle-Cap-Direct-v0 \
-  --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT>
+  --num_envs 1 --checkpoint <PATH_TO_CHECKPOINT> --model joint
 ```
+
+播放纯视觉 checkpoint 时也必须对应使用 `--model vision`。
 
 ### VTDexManip 手内 Reorient Up
 
